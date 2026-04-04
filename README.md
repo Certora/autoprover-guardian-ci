@@ -34,7 +34,7 @@ Create `.github/workflows/zeus-audit.yml` in your repository:
 name: Zeus Security Audit
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 permissions:
   issues: write
@@ -45,7 +45,7 @@ jobs:
   zeus-audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: zeus-audit/guardian-ci@v1
+      - uses: Certora/zeus-guardian-ci@v1
         with:
           api-key: ${{ secrets.ZEUS_API_KEY }}
           context: "contracts/**/*.sol"
@@ -53,12 +53,26 @@ jobs:
 
 That's it. Every PR will now be audited automatically.
 
+## One-Click Install from Dashboard
+
+Prefer a visual setup? You can install Zeus Guardian CI directly from the Zeus dashboard — no manual file creation needed.
+
+1. Go to your organization on [zeus-audit.com](https://zeus-audit.com)
+2. Click **GitHub Action** in the sidebar
+3. Connect your GitHub account
+4. Select the repository you want to protect
+5. Choose which branches to audit (e.g., `main`, `dev`, `staging`)
+6. Configure your settings (context patterns, severities, fail conditions)
+7. Click **Create Pull Request**
+
+Zeus will automatically open a PR on your repository with the workflow file configured exactly as you specified. Just merge the PR, then add your `ZEUS_API_KEY` secret in **Settings > Secrets and variables > Actions**.
+
 ## Private Repositories
 
 The default `GITHUB_TOKEN` may not have sufficient permissions for Zeus to clone private repositories. In that case, create a **Personal Access Token (PAT)** with `contents: read` scope and pass it:
 
 ```yaml
-- uses: zeus-audit/guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@v1
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -67,10 +81,20 @@ The default `GITHUB_TOKEN` may not have sufficient permissions for Zeus to clone
 
 ## Examples
 
+### Multiple Target Branches
+
+Audit PRs targeting any of your main branches:
+
+```yaml
+on:
+  pull_request:
+    branches: [main, dev, staging]
+```
+
 ### Fail on HIGH Severity Findings
 
 ```yaml
-- uses: zeus-audit/guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@v1
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -83,7 +107,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 
 ```yaml
 # Create issues for everything except INFO
-- uses: zeus-audit/guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@v1
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "src/**/*.sol,lib/**/*.sol"
@@ -93,7 +117,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 
 ```yaml
 # Only create issues for HIGH findings
-- uses: zeus-audit/guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@v1
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -102,7 +126,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 
 ```yaml
 # Create issues for all severities
-- uses: zeus-audit/guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@v1
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -112,7 +136,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 ### Maximum DeepDive Iterations
 
 ```yaml
-- uses: zeus-audit/guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@v1
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -123,7 +147,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 ### Disable Issue Creation (PR Comment Only)
 
 ```yaml
-- uses: zeus-audit/guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@v1
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -134,7 +158,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 
 ```yaml
 steps:
-  - uses: zeus-audit/guardian-ci@v1
+  - uses: Certora/zeus-guardian-ci@v1
     id: audit
     with:
       api-key: ${{ secrets.ZEUS_API_KEY }}
@@ -146,6 +170,20 @@ steps:
       echo "High findings: ${{ steps.audit.outputs.highs-count }}"
       echo "Issues created: ${{ steps.audit.outputs.issues-created }}"
 ```
+
+### Custom API URL (Staging / Self-hosted)
+
+If you're using a different Zeus environment (e.g., staging):
+
+```yaml
+- uses: Certora/zeus-guardian-ci@v1
+  with:
+    api-key: ${{ secrets.ZEUS_API_KEY }}
+    context: "contracts/**/*.sol"
+    api-base-url: "https://dev.zeus-audit.com"
+```
+
+> When installing via the Zeus dashboard, the correct `api-base-url` is set automatically based on the environment you're on.
 
 ## Inputs
 
