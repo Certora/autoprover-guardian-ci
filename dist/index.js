@@ -30605,7 +30605,27 @@ function getFindingsBySeverities(findings, severities) {
         result.push(...findings.infos);
     return result;
 }
+// Track active audit for cancellation on SIGTERM/SIGINT
+let activeAudit = null;
+function registerShutdownHandlers() {
+    const handler = async (signal) => {
+        if (activeAudit) {
+            core.info(`Received ${signal} — cancelling Zeus audit ${activeAudit.jobId}...`);
+            try {
+                await activeAudit.api.cancelAudit(activeAudit.jobId);
+                core.info("Zeus audit cancelled.");
+            }
+            catch {
+                core.warning("Failed to cancel Zeus audit on shutdown.");
+            }
+        }
+        process.exit(1);
+    };
+    process.on("SIGTERM", () => void handler("SIGTERM"));
+    process.on("SIGINT", () => void handler("SIGINT"));
+}
 async function run() {
+    registerShutdownHandlers();
     // ── Phase 1: Validate Inputs ──
     core.info("Phase 1: Validating inputs...");
     const config = (0, config_1.getConfig)();
@@ -30643,6 +30663,7 @@ async function run() {
         });
     }
     const jobId = createResponse.job_id;
+    activeAudit = { api, jobId };
     core.setOutput("job-id", jobId);
     core.info(`Audit created: ${jobId} (${createResponse.remaining_credits} credits remaining)`);
     // ── Phase 3: Poll for Completion ──
@@ -30691,6 +30712,7 @@ async function run() {
         }
         await sleep(config.pollInterval * 1000);
     }
+    activeAudit = null;
     core.setOutput("status", finalStatus);
     if (finalStatus === "failed") {
         const status = await api.getStatus(jobId);
