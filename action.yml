@@ -25,6 +25,15 @@ inputs:
     required: false
     default: "https://zeus-audit.com"
 
+  audit-type:
+    description: 'Audit type. Simple: "diff" or "full". Per-branch: "main:full,dev:diff" (fallback: diff).'
+    required: false
+    default: "diff"
+
+  scope:
+    description: 'Comma-separated scope patterns for full audits (subset of context to focus on). Only used when audit-type is "full".'
+    required: false
+
   preprompt:
     description: "Custom instructions for the audit"
     required: false

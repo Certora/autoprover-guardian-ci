@@ -37,24 +37,40 @@ async function run(): Promise<void> {
   core.info("Phase 1: Validating inputs...");
   const config = getConfig();
   core.info(`Target: ${config.target}`);
+  core.info(`Audit type: ${config.auditType}`);
   core.info(`Base SHA: ${config.branchStarting}`);
   core.info(`Head SHA: ${config.branchEnding}`);
   core.info(`Context patterns: ${config.context.join(", ")}`);
 
   const api = new ZeusApi(config.apiBaseUrl, config.apiKey);
 
-  // ── Phase 2: Create Diff Audit ──
-  core.info("Phase 2: Creating diff audit...");
-  const createResponse = await api.createDiffAudit({
-    target: config.target,
-    branch_starting: config.branchStarting,
-    branch_ending: config.branchEnding,
-    context: config.context,
-    preprompt: config.preprompt,
-    token: config.githubToken,
-    skip_submodules: config.skipSubmodules,
-    max_iterations: config.maxIterations,
-  });
+  // ── Phase 2: Create Audit ──
+  core.info(`Phase 2: Creating ${config.auditType} audit...`);
+
+  let createResponse;
+  if (config.auditType === "full") {
+    createResponse = await api.createFullAudit({
+      target: config.target,
+      branch: config.branchEnding,
+      context: config.context,
+      scope: config.scope,
+      preprompt: config.preprompt,
+      token: config.githubToken,
+      skip_submodules: config.skipSubmodules,
+      max_iterations: config.maxIterations,
+    });
+  } else {
+    createResponse = await api.createDiffAudit({
+      target: config.target,
+      branch_starting: config.branchStarting,
+      branch_ending: config.branchEnding,
+      context: config.context,
+      preprompt: config.preprompt,
+      token: config.githubToken,
+      skip_submodules: config.skipSubmodules,
+      max_iterations: config.maxIterations,
+    });
+  }
 
   const jobId = createResponse.job_id;
   core.setOutput("job-id", jobId);

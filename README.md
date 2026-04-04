@@ -4,11 +4,12 @@ A GitHub Action that runs [Zeus](https://zeus-audit.com) security audits on pull
 
 ## How It Works
 
-1. When a PR is opened or updated, the action sends the diff to Zeus for analysis
-2. Zeus audits the code changes between the base and head commits
-3. The action polls for completion and logs progress in real-time
-4. Once done, it creates GitHub issues for findings (configurable: HIGH, MEDIUM, LOW, INFO)
-5. A summary comment is always posted on the PR — even when no findings are detected, so you know Zeus ran
+1. When a PR is opened or updated, the action sends it to Zeus for analysis
+2. **Diff audit** (default): analyzes only the changed files between base and head commits
+3. **Full audit**: scans the entire codebase at the PR's head commit
+4. The action polls for completion and logs progress in real-time
+5. Once done, it creates GitHub issues for findings (configurable: HIGH, MEDIUM, LOW, INFO)
+6. A summary comment is always posted on the PR — even when no findings are detected, so you know Zeus ran
 
 ## Quick Start
 
@@ -89,6 +90,29 @@ Audit PRs targeting any of your main branches:
 on:
   pull_request:
     branches: [main, dev, staging]
+```
+
+### Full Audit (Entire Codebase)
+
+By default, the action runs a diff audit (changed files only). Set `audit-type: "full"` to scan the entire codebase at the PR head commit:
+
+```yaml
+- uses: Certora/zeus-guardian-ci@v1
+  with:
+    api-key: ${{ secrets.ZEUS_API_KEY }}
+    context: "contracts/**/*.sol"
+    audit-type: "full"
+```
+
+You can optionally narrow the focus with `scope`:
+
+```yaml
+- uses: Certora/zeus-guardian-ci@v1
+  with:
+    api-key: ${{ secrets.ZEUS_API_KEY }}
+    context: "contracts/**/*.sol"
+    audit-type: "full"
+    scope: "contracts/src/**/*.sol"
 ```
 
 ### Fail on HIGH Severity Findings
@@ -193,6 +217,8 @@ If you're using a different Zeus environment (e.g., staging):
 | `context` | Yes | - | Comma-separated glob patterns for files to analyze |
 | `github-token` | No | `${{ github.token }}` | GitHub token for issues/comments and private repo access |
 | `api-base-url` | No | `https://zeus-audit.com` | Zeus API base URL |
+| `audit-type` | No | `diff` | `"diff"` (changed files only) or `"full"` (entire codebase) |
+| `scope` | No | - | Comma-separated scope patterns for full audits (subset of context) |
 | `preprompt` | No | - | Custom instructions for the audit |
 | `max-iterations` | No | `6` | DeepDive iterations (4-10) |
 | `skip-submodules` | No | `false` | Skip git submodule loading |

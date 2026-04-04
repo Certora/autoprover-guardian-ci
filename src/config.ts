@@ -1,6 +1,6 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
-import type { ActionConfig, Severity } from "./types";
+import type { ActionConfig, AuditType, Severity } from "./types";
 import {
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_POLL_INTERVAL,
@@ -22,6 +22,14 @@ function parseSeverities(input: string): Severity[] {
       }
       return true;
     }) as Severity[];
+}
+
+function parseCommaSeparated(input: string): string[] {
+  if (!input.trim()) return [];
+  return input
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
 }
 
 export function getConfig(): ActionConfig {
@@ -50,10 +58,7 @@ export function getConfig(): ActionConfig {
   const target = `https://github.com/${owner}/${repo}`;
 
   const contextInput = core.getInput("context", { required: true });
-  const context = contextInput
-    .split(",")
-    .map((p) => p.trim())
-    .filter(Boolean);
+  const context = parseCommaSeparated(contextInput);
 
   if (context.length === 0) {
     throw new Error("At least one context pattern is required.");
@@ -67,12 +72,42 @@ export function getConfig(): ActionConfig {
     throw new Error("max-iterations must be between 4 and 10.");
   }
 
+  const auditTypeInput = core.getInput("audit-type") || "diff";
+  const targetBranchRef: string = pr.base?.ref ?? "";
+  let auditType: AuditType;
+
+  if (auditTypeInput.includes(":")) {
+    // Branch mapping format: "main:full,dev:diff"
+    const mappings = auditTypeInput.split(",").map((m) => m.trim());
+    let resolved: AuditType = "diff"; // default fallback
+    for (const mapping of mappings) {
+      const [branch, type] = mapping.split(":").map((s) => s.trim());
+      if (branch === targetBranchRef && (type === "full" || type === "diff")) {
+        resolved = type;
+        break;
+      }
+    }
+    auditType = resolved;
+    core.info(`Branch "${targetBranchRef}" resolved to audit type: ${auditType}`);
+  } else if (auditTypeInput === "full" || auditTypeInput === "diff") {
+    auditType = auditTypeInput;
+  } else {
+    throw new Error(
+      'audit-type must be "full", "diff", or a branch mapping like "main:full,dev:diff".'
+    );
+  }
+
+  const scopeInput = core.getInput("scope") || "";
+  const scope = parseCommaSeparated(scopeInput);
+
   return {
     apiKey: core.getInput("api-key", { required: true }),
     apiBaseUrl: (
       core.getInput("api-base-url") || "https://zeus-audit.com"
     ).replace(/\/$/, ""),
+    auditType,
     context,
+    scope: scope.length > 0 ? scope : undefined,
     githubToken: core.getInput("github-token", { required: true }),
     preprompt: core.getInput("preprompt") || undefined,
     maxIterations,

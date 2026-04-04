@@ -3,6 +3,7 @@ import type {
   AuditResultResponse,
   CreateAuditResponse,
   DiffAuditRequest,
+  FullAuditRequest,
   ApiErrorResponse,
   ProgressResponse,
   StatusResponse,
@@ -87,6 +88,17 @@ export class ZeusApi {
     private baseUrl: string,
     private apiKey: string
   ) {}
+
+  async createFullAudit(body: FullAuditRequest): Promise<CreateAuditResponse> {
+    return request<CreateAuditResponse>(
+      `${this.baseUrl}/api/v1/audits`,
+      this.apiKey,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      }
+    );
+  }
 
   async createDiffAudit(body: DiffAuditRequest): Promise<CreateAuditResponse> {
     return request<CreateAuditResponse>(

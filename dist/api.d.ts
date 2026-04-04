@@ -1,4 +1,4 @@
-import type { AuditResultResponse, CreateAuditResponse, DiffAuditRequest, ProgressResponse, StatusResponse } from "./types";
+import type { AuditResultResponse, CreateAuditResponse, DiffAuditRequest, FullAuditRequest, ProgressResponse, StatusResponse } from "./types";
 export declare class ZeusApiError extends Error {
     code: string;
     statusCode: number;
@@ -8,6 +8,7 @@ export declare class ZeusApi {
     private baseUrl;
     private apiKey;
     constructor(baseUrl: string, apiKey: string);
+    createFullAudit(body: FullAuditRequest): Promise<CreateAuditResponse>;
     createDiffAudit(body: DiffAuditRequest): Promise<CreateAuditResponse>;
     getStatus(jobId: string): Promise<StatusResponse>;
     getProgress(jobId: string): Promise<ProgressResponse>;

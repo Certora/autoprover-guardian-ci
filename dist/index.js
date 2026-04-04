@@ -30030,6 +30030,12 @@ class ZeusApi {
         this.baseUrl = baseUrl;
         this.apiKey = apiKey;
     }
+    async createFullAudit(body) {
+        return request(`${this.baseUrl}/api/v1/audits`, this.apiKey, {
+            method: "POST",
+            body: JSON.stringify(body),
+        });
+    }
     async createDiffAudit(body) {
         return request(`${this.baseUrl}/api/v1/diff-audits`, this.apiKey, {
             method: "POST",
@@ -30113,6 +30119,14 @@ function parseSeverities(input) {
         return true;
     });
 }
+function parseCommaSeparated(input) {
+    if (!input.trim())
+        return [];
+    return input
+        .split(",")
+        .map((p) => p.trim())
+        .filter(Boolean);
+}
 function getConfig() {
     const pr = github.context.payload.pull_request;
     if (!pr) {
@@ -30129,10 +30143,7 @@ function getConfig() {
     const { owner, repo } = github.context.repo;
     const target = `https://github.com/${owner}/${repo}`;
     const contextInput = core.getInput("context", { required: true });
-    const context = contextInput
-        .split(",")
-        .map((p) => p.trim())
-        .filter(Boolean);
+    const context = parseCommaSeparated(contextInput);
     if (context.length === 0) {
         throw new Error("At least one context pattern is required.");
     }
@@ -30140,10 +30151,37 @@ function getConfig() {
     if (isNaN(maxIterations) || maxIterations < 4 || maxIterations > 10) {
         throw new Error("max-iterations must be between 4 and 10.");
     }
+    const auditTypeInput = core.getInput("audit-type") || "diff";
+    const targetBranchRef = pr.base?.ref ?? "";
+    let auditType;
+    if (auditTypeInput.includes(":")) {
+        // Branch mapping format: "main:full,dev:diff"
+        const mappings = auditTypeInput.split(",").map((m) => m.trim());
+        let resolved = "diff"; // default fallback
+        for (const mapping of mappings) {
+            const [branch, type] = mapping.split(":").map((s) => s.trim());
+            if (branch === targetBranchRef && (type === "full" || type === "diff")) {
+                resolved = type;
+                break;
+            }
+        }
+        auditType = resolved;
+        core.info(`Branch "${targetBranchRef}" resolved to audit type: ${auditType}`);
+    }
+    else if (auditTypeInput === "full" || auditTypeInput === "diff") {
+        auditType = auditTypeInput;
+    }
+    else {
+        throw new Error('audit-type must be "full", "diff", or a branch mapping like "main:full,dev:diff".');
+    }
+    const scopeInput = core.getInput("scope") || "";
+    const scope = parseCommaSeparated(scopeInput);
     return {
         apiKey: core.getInput("api-key", { required: true }),
         apiBaseUrl: (core.getInput("api-base-url") || "https://zeus-audit.com").replace(/\/$/, ""),
+        auditType,
         context,
+        scope: scope.length > 0 ? scope : undefined,
         githubToken: core.getInput("github-token", { required: true }),
         preprompt: core.getInput("preprompt") || undefined,
         maxIterations,
@@ -30572,22 +30610,38 @@ async function run() {
     core.info("Phase 1: Validating inputs...");
     const config = (0, config_1.getConfig)();
     core.info(`Target: ${config.target}`);
+    core.info(`Audit type: ${config.auditType}`);
     core.info(`Base SHA: ${config.branchStarting}`);
     core.info(`Head SHA: ${config.branchEnding}`);
     core.info(`Context patterns: ${config.context.join(", ")}`);
     const api = new api_1.ZeusApi(config.apiBaseUrl, config.apiKey);
-    // ── Phase 2: Create Diff Audit ──
-    core.info("Phase 2: Creating diff audit...");
-    const createResponse = await api.createDiffAudit({
-        target: config.target,
-        branch_starting: config.branchStarting,
-        branch_ending: config.branchEnding,
-        context: config.context,
-        preprompt: config.preprompt,
-        token: config.githubToken,
-        skip_submodules: config.skipSubmodules,
-        max_iterations: config.maxIterations,
-    });
+    // ── Phase 2: Create Audit ──
+    core.info(`Phase 2: Creating ${config.auditType} audit...`);
+    let createResponse;
+    if (config.auditType === "full") {
+        createResponse = await api.createFullAudit({
+            target: config.target,
+            branch: config.branchEnding,
+            context: config.context,
+            scope: config.scope,
+            preprompt: config.preprompt,
+            token: config.githubToken,
+            skip_submodules: config.skipSubmodules,
+            max_iterations: config.maxIterations,
+        });
+    }
+    else {
+        createResponse = await api.createDiffAudit({
+            target: config.target,
+            branch_starting: config.branchStarting,
+            branch_ending: config.branchEnding,
+            context: config.context,
+            preprompt: config.preprompt,
+            token: config.githubToken,
+            skip_submodules: config.skipSubmodules,
+            max_iterations: config.maxIterations,
+        });
+    }
     const jobId = createResponse.job_id;
     core.setOutput("job-id", jobId);
     core.info(`Audit created: ${jobId} (${createResponse.remaining_credits} credits remaining)`);

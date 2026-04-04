@@ -1,5 +1,16 @@
 export type Severity = "HIGH" | "MEDIUM" | "LOW" | "INFO";
+export type AuditType = "full" | "diff";
 export type AuditStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";
+export type FullAuditRequest = {
+    target: string;
+    branch?: string;
+    context: string[];
+    scope?: string[];
+    preprompt?: string;
+    token?: string;
+    skip_submodules?: boolean;
+    max_iterations?: number;
+};
 export type DiffAuditRequest = {
     target: string;
     branch_starting: string;
@@ -67,7 +78,9 @@ export type ApiErrorResponse = {
 export type ActionConfig = {
     apiKey: string;
     apiBaseUrl: string;
+    auditType: AuditType;
     context: string[];
+    scope?: string[];
     githubToken: string;
     preprompt?: string;
     maxIterations: number;
