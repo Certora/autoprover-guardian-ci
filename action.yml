@@ -1,0 +1,101 @@
+name: "Zeus Guardian CI"
+description: "Run Zeus security audits on pull request changes and create GitHub issues for findings"
+author: "zeus-audit"
+
+branding:
+  icon: "shield"
+  color: "purple"
+
+inputs:
+  api-key:
+    description: "Zeus API key (zeus_live_...)"
+    required: true
+
+  context:
+    description: 'Comma-separated glob patterns for files to analyze (e.g., "contracts/**/*.sol,src/**/*.sol")'
+    required: true
+
+  github-token:
+    description: "GitHub token for creating issues and PR comments. Also passed to Zeus for private repo access."
+    required: true
+    default: "${{ github.token }}"
+
+  api-base-url:
+    description: "Zeus API base URL"
+    required: false
+    default: "https://zeus-audit.com"
+
+  preprompt:
+    description: "Custom instructions for the audit"
+    required: false
+
+  max-iterations:
+    description: "DeepDive iterations (4-10)"
+    required: false
+    default: "6"
+
+  skip-submodules:
+    description: "Skip git submodule loading"
+    required: false
+    default: "false"
+
+  poll-interval:
+    description: "Seconds between status polls"
+    required: false
+    default: "60"
+
+  timeout:
+    description: "Maximum minutes to wait for audit completion"
+    required: false
+    default: "120"
+
+  create-issues:
+    description: "Create GitHub issues for findings"
+    required: false
+    default: "true"
+
+  issue-severities:
+    description: 'Comma-separated severities to create issues for (e.g., "HIGH,MEDIUM")'
+    required: false
+    default: "HIGH,MEDIUM"
+
+  comment-on-pr:
+    description: "Post a summary comment on the PR"
+    required: false
+    default: "true"
+
+  fail-on:
+    description: 'Fail the action if findings of these severities exist (e.g., "HIGH" or "HIGH,MEDIUM"). Empty means never fail.'
+    required: false
+    default: ""
+
+  labels:
+    description: "Comma-separated labels to add to created issues"
+    required: false
+    default: "zeus-audit,security"
+
+outputs:
+  job-id:
+    description: "Zeus audit job ID"
+
+  status:
+    description: "Final audit status (succeeded, failed, cancelled)"
+
+  highs-count:
+    description: "Number of HIGH severity findings"
+
+  mediums-count:
+    description: "Number of MEDIUM severity findings"
+
+  lows-count:
+    description: "Number of LOW severity findings"
+
+  infos-count:
+    description: "Number of INFO severity findings"
+
+  issues-created:
+    description: "Comma-separated list of created issue URLs"
+
+runs:
+  using: "node20"
+  main: "dist/index.js"
