@@ -1,6 +1,6 @@
 # Zeus Guardian CI
 
-A GitHub Action that runs [Zeus](https://zeus-audit.com) security audits on pull request changes and automatically creates GitHub issues for each finding.
+A GitHub Action that runs [Zeus](https://zeus.certora.com) security audits on pull request changes and automatically creates GitHub issues for each finding.
 
 ## How It Works
 
@@ -15,7 +15,7 @@ A GitHub Action that runs [Zeus](https://zeus-audit.com) security audits on pull
 
 ### Step 1: Get a Zeus API Key
 
-1. Sign up at [zeus-audit.com](https://zeus-audit.com)
+1. Sign up at [zeus.certora.com](https://zeus.certora.com)
 2. Navigate to **API** in your organization sidebar
 3. Click **Generate Key** and copy the key
 
@@ -58,7 +58,7 @@ That's it. Every PR will now be audited automatically.
 
 Prefer a visual setup? You can install Zeus Guardian CI directly from the Zeus dashboard — no manual file creation needed.
 
-1. Go to your organization on [zeus-audit.com](https://zeus-audit.com)
+1. Go to your organization on [zeus.certora.com](https://zeus.certora.com)
 2. Click **GitHub Action** in the sidebar
 3. Connect your GitHub account
 4. Select the repository you want to protect
@@ -102,6 +102,19 @@ By default, the action runs a diff audit (changed files only). Set `audit-type: 
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
     audit-type: "full"
+```
+
+Full audits use repo memory by default, matching the dashboard: accepted
+assumptions from previous audits are sent as context so Zeus does not re-report
+them. Disable it with `use-memory: "false"`:
+
+```yaml
+- uses: Certora/zeus-guardian-ci@v1
+  with:
+    api-key: ${{ secrets.ZEUS_API_KEY }}
+    context: "contracts/**/*.sol"
+    audit-type: "full"
+    use-memory: "false"
 ```
 
 You can optionally narrow the focus with `scope`:
@@ -204,7 +217,7 @@ If you're using a different Zeus environment (e.g., staging):
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
-    api-base-url: "https://dev.zeus-audit.com"
+    api-base-url: "https://dev.zeus.certora.com"
 ```
 
 > When installing via the Zeus dashboard, the correct `api-base-url` is set automatically based on the environment you're on.
@@ -216,10 +229,11 @@ If you're using a different Zeus environment (e.g., staging):
 | `api-key` | Yes | - | Zeus API key (`zeus_live_...`) |
 | `context` | Yes | - | Comma-separated glob patterns for files to analyze |
 | `github-token` | No | `${{ github.token }}` | GitHub token for issues/comments and private repo access |
-| `api-base-url` | No | `https://zeus-audit.com` | Zeus API base URL |
+| `api-base-url` | No | `https://zeus.certora.com` | Zeus API base URL |
 | `audit-type` | No | `diff` | `"diff"` (changed files only) or `"full"` (entire codebase) |
 | `scope` | No | - | Comma-separated scope patterns for full audits (subset of context) |
 | `preprompt` | No | - | Custom instructions for the audit |
+| `use-memory` | No | `true` | Use repo memory for full audits; set to `false` to skip accepted assumptions |
 | `max-iterations` | No | `6` | DeepDive iterations (4-10) |
 | `skip-submodules` | No | `false` | Skip git submodule loading |
 | `poll-interval` | No | `60` | Seconds between status polls |
@@ -267,7 +281,7 @@ Re-running the action updates the existing comment rather than posting a new one
 
 ## Credits
 
-Each diff audit consumes **1 Zeus credit**. Credits are refunded if the Zeus backend fails to start the audit. See [zeus-audit.com](https://zeus-audit.com) for pricing.
+Each diff audit consumes **1 Zeus credit**. Credits are refunded if the Zeus backend fails to start the audit. See [zeus.certora.com](https://zeus.certora.com) for pricing.
 
 ## License
 

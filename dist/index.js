@@ -30178,12 +30178,13 @@ function getConfig() {
     const scope = parseCommaSeparated(scopeInput);
     return {
         apiKey: core.getInput("api-key", { required: true }),
-        apiBaseUrl: (core.getInput("api-base-url") || "https://zeus-audit.com").replace(/\/$/, ""),
+        apiBaseUrl: (core.getInput("api-base-url") || "https://zeus.certora.com").replace(/\/$/, ""),
         auditType,
         context,
         scope: scope.length > 0 ? scope : undefined,
         githubToken: core.getInput("github-token", { required: true }),
         preprompt: core.getInput("preprompt") || undefined,
+        useMemory: core.getInput("use-memory") !== "false",
         maxIterations,
         skipSubmodules: core.getInput("skip-submodules") === "true",
         pollInterval: parseInt(core.getInput("poll-interval") || String(constants_1.DEFAULT_POLL_INTERVAL), 10),
@@ -30272,7 +30273,7 @@ ${finding.description}
 ${finding.recommendation}
 
 ---
-_This issue was automatically created by [Zeus Audit](https://zeus-audit.com). To dismiss, close this issue._`;
+_This issue was automatically created by [Zeus Audit](https://zeus.certora.com). To dismiss, close this issue._`;
 }
 function formatPrComment(findings, jobId, cost, issueLinks, prNumber) {
     const counts = {
@@ -30327,7 +30328,7 @@ No security issues were detected in this PR.
         }
         body += `</details>\n`;
     }
-    body += `\n---\n_Powered by [Zeus Audit](https://zeus-audit.com)_\n`;
+    body += `\n---\n_Powered by [Zeus Audit](https://zeus.certora.com)_\n`;
     return body;
 }
 function formatLegacyPrComment(markdownResult, jobId, prNumber) {
@@ -30346,7 +30347,7 @@ ${markdownResult}
 </details>
 
 ---
-_Powered by [Zeus Audit](https://zeus-audit.com)_
+_Powered by [Zeus Audit](https://zeus.certora.com)_
 `;
 }
 
@@ -30645,6 +30646,7 @@ async function run() {
             context: config.context,
             scope: config.scope,
             preprompt: config.preprompt,
+            use_memory: config.useMemory,
             token: config.githubToken,
             skip_submodules: config.skipSubmodules,
             max_iterations: config.maxIterations,
@@ -30786,7 +30788,7 @@ run().catch((error) => {
                 core.setFailed("Invalid Zeus API key. Please check your ZEUS_API_KEY secret.");
                 break;
             case "insufficient_credits":
-                core.setFailed("Insufficient Zeus credits. Please purchase more at https://zeus-audit.com.");
+                core.setFailed("Insufficient Zeus credits. Please purchase more at https://zeus.certora.com.");
                 break;
             default:
                 core.setFailed(`Zeus API error (${error.code}): ${error.message}`);

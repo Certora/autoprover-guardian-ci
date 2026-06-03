@@ -23,7 +23,7 @@ inputs:
   api-base-url:
     description: "Zeus API base URL"
     required: false
-    default: "https://zeus-audit.com"
+    default: "https://zeus.certora.com"
 
   audit-type:
     description: 'Audit type. Simple: "diff" or "full". Per-branch: "main:full,dev:diff" (fallback: diff).'
@@ -37,6 +37,11 @@ inputs:
   preprompt:
     description: "Custom instructions for the audit"
     required: false
+
+  use-memory:
+    description: "Use Zeus repo memory for full audits. Set to false to skip previously accepted assumptions."
+    required: false
+    default: "true"
 
   max-iterations:
     description: "DeepDive iterations (4-10)"

@@ -103,13 +103,14 @@ export function getConfig(): ActionConfig {
   return {
     apiKey: core.getInput("api-key", { required: true }),
     apiBaseUrl: (
-      core.getInput("api-base-url") || "https://zeus-audit.com"
+      core.getInput("api-base-url") || "https://zeus.certora.com"
     ).replace(/\/$/, ""),
     auditType,
     context,
     scope: scope.length > 0 ? scope : undefined,
     githubToken: core.getInput("github-token", { required: true }),
     preprompt: core.getInput("preprompt") || undefined,
+    useMemory: core.getInput("use-memory") !== "false",
     maxIterations,
     skipSubmodules: core.getInput("skip-submodules") === "true",
     pollInterval: parseInt(

@@ -31,7 +31,7 @@ ${finding.description}
 ${finding.recommendation}
 
 ---
-_This issue was automatically created by [Zeus Audit](https://zeus-audit.com). To dismiss, close this issue._`;
+_This issue was automatically created by [Zeus Audit](https://zeus.certora.com). To dismiss, close this issue._`;
 }
 
 export function formatPrComment(
@@ -98,7 +98,7 @@ No security issues were detected in this PR.
     body += `</details>\n`;
   }
 
-  body += `\n---\n_Powered by [Zeus Audit](https://zeus-audit.com)_\n`;
+  body += `\n---\n_Powered by [Zeus Audit](https://zeus.certora.com)_\n`;
 
   return body;
 }
@@ -123,6 +123,6 @@ ${markdownResult}
 </details>
 
 ---
-_Powered by [Zeus Audit](https://zeus-audit.com)_
+_Powered by [Zeus Audit](https://zeus.certora.com)_
 `;
 }

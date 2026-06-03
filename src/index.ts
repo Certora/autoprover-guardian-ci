@@ -77,6 +77,7 @@ async function run(): Promise<void> {
       context: config.context,
       scope: config.scope,
       preprompt: config.preprompt,
+      use_memory: config.useMemory,
       token: config.githubToken,
       skip_submodules: config.skipSubmodules,
       max_iterations: config.maxIterations,
@@ -288,7 +289,7 @@ run().catch((error) => {
         break;
       case "insufficient_credits":
         core.setFailed(
-          "Insufficient Zeus credits. Please purchase more at https://zeus-audit.com."
+          "Insufficient Zeus credits. Please purchase more at https://zeus.certora.com."
         );
         break;
       default:

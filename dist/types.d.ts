@@ -7,6 +7,7 @@ export type FullAuditRequest = {
     context: string[];
     scope?: string[];
     preprompt?: string;
+    use_memory?: boolean;
     token?: string;
     skip_submodules?: boolean;
     max_iterations?: number;
@@ -83,6 +84,7 @@ export type ActionConfig = {
     scope?: string[];
     githubToken: string;
     preprompt?: string;
+    useMemory: boolean;
     maxIterations: number;
     skipSubmodules: boolean;
     pollInterval: number;
