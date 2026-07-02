@@ -30193,7 +30193,7 @@ function getConfig() {
         issueSeverities: parseSeverities(core.getInput("issue-severities") || "HIGH,MEDIUM"),
         commentOnPr: core.getInput("comment-on-pr") !== "false",
         failOn: parseSeverities(core.getInput("fail-on") || ""),
-        labels: (core.getInput("labels") || "zeus-audit,security")
+        labels: (core.getInput("labels") || "auto-prover,security")
             .split(",")
             .map((l) => l.trim())
             .filter(Boolean),
@@ -30226,8 +30226,8 @@ exports.SEVERITY_EMOJI = {
     LOW: "\u{1F7E1}",
     INFO: "\u{1F535}",
 };
-exports.SEVERITY_LABEL_PREFIX = "zeus:";
-exports.ZEUS_AUDIT_LABEL = "zeus-audit";
+exports.SEVERITY_LABEL_PREFIX = "auto-prover:";
+exports.ZEUS_AUDIT_LABEL = "auto-prover";
 exports.PR_COMMENT_MARKER = "<!-- zeus-guardian-ci -->";
 exports.DEFAULT_POLL_INTERVAL = 60;
 exports.DEFAULT_TIMEOUT = 120;
@@ -30251,7 +30251,7 @@ exports.formatPrComment = formatPrComment;
 exports.formatLegacyPrComment = formatLegacyPrComment;
 const constants_1 = __nccwpck_require__(5851);
 function formatIssueTitle(finding) {
-    return `[Zeus] ${finding.severity}: ${finding.title} (${finding.id})`;
+    return `[Auto Prover] ${finding.severity}: ${finding.title} (${finding.id})`;
 }
 function formatIssueBody(finding, jobId, prNumber) {
     const locations = finding.locations.length > 0
@@ -30262,7 +30262,7 @@ function formatIssueBody(finding, jobId, prNumber) {
 **Severity:** ${finding.severity}
 **Locations:** ${locations}
 **Detected in:** PR #${prNumber}
-**Zeus Job:** \`${jobId}\`
+**Auto Prover Job:** \`${jobId}\`
 
 ### Description
 
@@ -30273,7 +30273,7 @@ ${finding.description}
 ${finding.recommendation}
 
 ---
-_This issue was automatically created by [Zeus Audit](https://zeus.certora.com). To dismiss, close this issue._`;
+_This issue was automatically created by [Auto Prover](https://zeus.certora.com). To dismiss, close this issue._`;
 }
 function formatPrComment(findings, jobId, cost, issueLinks, prNumber) {
     const counts = {
@@ -30286,7 +30286,7 @@ function formatPrComment(findings, jobId, cost, issueLinks, prNumber) {
     let body;
     if (totalFindings === 0) {
         body = `${constants_1.PR_COMMENT_MARKER}
-## \u2705 Zeus Audit Results — No Findings
+## \u2705 Auto Prover Results — No Findings
 
 No security issues were detected in this PR.
 
@@ -30295,7 +30295,7 @@ No security issues were detected in this PR.
     }
     else {
         body = `${constants_1.PR_COMMENT_MARKER}
-## ${constants_1.SEVERITY_EMOJI.HIGH} Zeus Audit Results
+## ${constants_1.SEVERITY_EMOJI.HIGH} Auto Prover Results
 
 | Severity | Count |
 |----------|-------|
@@ -30328,12 +30328,12 @@ No security issues were detected in this PR.
         }
         body += `</details>\n`;
     }
-    body += `\n---\n_Powered by [Zeus Audit](https://zeus.certora.com)_\n`;
+    body += `\n---\n_Powered by [Auto Prover](https://zeus.certora.com)_\n`;
     return body;
 }
 function formatLegacyPrComment(markdownResult, jobId, prNumber) {
     return `${constants_1.PR_COMMENT_MARKER}
-## ${constants_1.SEVERITY_EMOJI.HIGH} Zeus Audit Results
+## ${constants_1.SEVERITY_EMOJI.HIGH} Auto Prover Results
 
 **Job:** \`${jobId}\` | **PR:** #${prNumber}
 
@@ -30347,7 +30347,7 @@ ${markdownResult}
 </details>
 
 ---
-_Powered by [Zeus Audit](https://zeus.certora.com)_
+_Powered by [Auto Prover](https://zeus.certora.com)_
 `;
 }
 
@@ -30606,18 +30606,29 @@ function getFindingsBySeverities(findings, severities) {
         result.push(...findings.infos);
     return result;
 }
+function firstFiniteNumber(...values) {
+    for (const value of values) {
+        if (typeof value === "number" && Number.isFinite(value)) {
+            return value;
+        }
+    }
+    return null;
+}
+function formatUsd(value) {
+    return value === null ? "unavailable" : `$${value.toFixed(2)}`;
+}
 // Track active audit for cancellation on SIGTERM/SIGINT
 let activeAudit = null;
 function registerShutdownHandlers() {
     const handler = async (signal) => {
         if (activeAudit) {
-            core.info(`Received ${signal} — cancelling Zeus audit ${activeAudit.jobId}...`);
+            core.info(`Received ${signal} — cancelling Auto Prover audit ${activeAudit.jobId}...`);
             try {
                 await activeAudit.api.cancelAudit(activeAudit.jobId);
-                core.info("Zeus audit cancelled.");
+                core.info("Auto Prover audit cancelled.");
             }
             catch {
-                core.warning("Failed to cancel Zeus audit on shutdown.");
+                core.warning("Failed to cancel Auto Prover audit on shutdown.");
             }
         }
         process.exit(1);
@@ -30667,7 +30678,10 @@ async function run() {
     const jobId = createResponse.job_id;
     activeAudit = { api, jobId };
     core.setOutput("job-id", jobId);
-    core.info(`Audit created: ${jobId} (${createResponse.remaining_credits} credits remaining)`);
+    const remainingBalance = firstFiniteNumber(createResponse.current_balance_usd, createResponse.remaining_credits);
+    core.info(remainingBalance === null
+        ? `Audit created: ${jobId}`
+        : `Audit created: ${jobId} (${formatUsd(remainingBalance)} balance remaining)`);
     // ── Phase 3: Poll for Completion ──
     core.info("Phase 3: Polling for completion...");
     const startTime = Date.now();
@@ -30693,10 +30707,11 @@ async function run() {
             const progress = await api.getProgress(jobId);
             consecutiveFailures = 0;
             finalStatus = progress.status;
+            const currentCost = firstFiniteNumber(progress.billed_amount_usd, progress.actual_cost_usd);
             core.info(`[${Math.round(elapsed / 60000)}m] Status: ${progress.status} | ` +
                 `Phase: ${progress.current_phase} | ` +
                 `Progress: ${progress.progress_percent.toFixed(1)}% | ` +
-                `Cost: $${progress.actual_cost_usd.toFixed(2)}`);
+                `Cost: ${formatUsd(currentCost)}`);
             if (progress.status === "succeeded" ||
                 progress.status === "failed" ||
                 progress.status === "cancelled") {
@@ -30708,7 +30723,7 @@ async function run() {
             core.warning(`Poll failed (${consecutiveFailures}/${constants_1.MAX_CONSECUTIVE_POLL_FAILURES}): ${error instanceof Error ? error.message : String(error)}`);
             if (consecutiveFailures >= constants_1.MAX_CONSECUTIVE_POLL_FAILURES) {
                 core.setOutput("status", "failed");
-                core.setFailed(`Lost connection to Zeus API after ${constants_1.MAX_CONSECUTIVE_POLL_FAILURES} consecutive failures.`);
+                core.setFailed(`Lost connection to Auto Prover API after ${constants_1.MAX_CONSECUTIVE_POLL_FAILURES} consecutive failures.`);
                 return;
             }
         }
@@ -30769,7 +30784,8 @@ async function run() {
     // ── Phase 5: PR Comment & Fail Check ──
     core.info("Phase 5: Posting PR comment...");
     if (config.commentOnPr) {
-        const comment = (0, format_1.formatPrComment)(findings, jobId, result.actual_cost_usd, issueLinks, config.prNumber);
+        const billedCostUsd = firstFiniteNumber(result.billed_amount_usd, result.actual_cost_usd) ?? 0;
+        const comment = (0, format_1.formatPrComment)(findings, jobId, billedCostUsd, issueLinks, config.prNumber);
         await ghClient.upsertPrComment(config.prNumber, comment);
     }
     // Check fail-on condition
@@ -30779,19 +30795,19 @@ async function run() {
             core.setFailed(`Found ${failFindings.length} findings matching fail-on severities: ${config.failOn.join(", ")}`);
         }
     }
-    core.info("Zeus Guardian CI completed successfully.");
+    core.info("Auto Prover CI completed successfully.");
 }
 run().catch((error) => {
     if (error instanceof api_1.ZeusApiError) {
         switch (error.code) {
             case "invalid_api_key":
-                core.setFailed("Invalid Zeus API key. Please check your ZEUS_API_KEY secret.");
+                core.setFailed("Invalid Auto Prover API key. Please check your AI_AUDITOR_API_KEY secret.");
                 break;
             case "insufficient_credits":
-                core.setFailed("Insufficient Zeus credits. Please purchase more at https://zeus.certora.com.");
+                core.setFailed("Insufficient Auto Prover balance. Please top up at https://zeus.certora.com.");
                 break;
             default:
-                core.setFailed(`Zeus API error (${error.code}): ${error.message}`);
+                core.setFailed(`Auto Prover API error (${error.code}): ${error.message}`);
         }
     }
     else {

@@ -25,8 +25,11 @@ export type DiffAuditRequest = {
 export type CreateAuditResponse = {
     job_id: string;
     status: AuditStatus;
-    audit_type: string;
-    remaining_credits: number;
+    audit_type?: string;
+    required_balance_usd?: number;
+    current_balance_usd?: number;
+    /** Legacy SaaS response field, kept for older deployments. */
+    remaining_credits?: number;
 };
 export type StatusResponse = {
     job_id: string;
@@ -44,7 +47,9 @@ export type ProgressResponse = {
     total_phases: number;
     progress: number;
     progress_percent: number;
-    actual_cost_usd: number;
+    billed_amount_usd?: number;
+    /** Legacy backend/private API field, not exposed by current public v1 API. */
+    actual_cost_usd?: number;
 };
 export type Finding = {
     id: string;
@@ -63,7 +68,9 @@ export type AuditFindings = {
 export type AuditResultResponse = {
     job_id: string;
     status: string;
-    actual_cost_usd: number;
+    billed_amount_usd?: number;
+    /** Legacy backend/private API field, not exposed by current public v1 API. */
+    actual_cost_usd?: number;
     result: {
         config: Record<string, unknown>;
         findings: AuditFindings;

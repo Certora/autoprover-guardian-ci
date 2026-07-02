@@ -2,7 +2,7 @@ import type { AuditFindings, Finding, Severity } from "./types";
 import { PR_COMMENT_MARKER, SEVERITY_EMOJI } from "./constants";
 
 export function formatIssueTitle(finding: Finding): string {
-  return `[Zeus] ${finding.severity}: ${finding.title} (${finding.id})`;
+  return `[Auto Prover] ${finding.severity}: ${finding.title} (${finding.id})`;
 }
 
 export function formatIssueBody(
@@ -20,7 +20,7 @@ export function formatIssueBody(
 **Severity:** ${finding.severity}
 **Locations:** ${locations}
 **Detected in:** PR #${prNumber}
-**Zeus Job:** \`${jobId}\`
+**Auto Prover Job:** \`${jobId}\`
 
 ### Description
 
@@ -31,7 +31,7 @@ ${finding.description}
 ${finding.recommendation}
 
 ---
-_This issue was automatically created by [Zeus Audit](https://zeus.certora.com). To dismiss, close this issue._`;
+_This issue was automatically created by [Auto Prover](https://zeus.certora.com). To dismiss, close this issue._`;
 }
 
 export function formatPrComment(
@@ -54,7 +54,7 @@ export function formatPrComment(
 
   if (totalFindings === 0) {
     body = `${PR_COMMENT_MARKER}
-## \u2705 Zeus Audit Results — No Findings
+## \u2705 Auto Prover Results — No Findings
 
 No security issues were detected in this PR.
 
@@ -62,7 +62,7 @@ No security issues were detected in this PR.
 `;
   } else {
     body = `${PR_COMMENT_MARKER}
-## ${SEVERITY_EMOJI.HIGH} Zeus Audit Results
+## ${SEVERITY_EMOJI.HIGH} Auto Prover Results
 
 | Severity | Count |
 |----------|-------|
@@ -98,7 +98,7 @@ No security issues were detected in this PR.
     body += `</details>\n`;
   }
 
-  body += `\n---\n_Powered by [Zeus Audit](https://zeus.certora.com)_\n`;
+  body += `\n---\n_Powered by [Auto Prover](https://zeus.certora.com)_\n`;
 
   return body;
 }
@@ -109,7 +109,7 @@ export function formatLegacyPrComment(
   prNumber: number
 ): string {
   return `${PR_COMMENT_MARKER}
-## ${SEVERITY_EMOJI.HIGH} Zeus Audit Results
+## ${SEVERITY_EMOJI.HIGH} Auto Prover Results
 
 **Job:** \`${jobId}\` | **PR:** #${prNumber}
 
@@ -123,6 +123,6 @@ ${markdownResult}
 </details>
 
 ---
-_Powered by [Zeus Audit](https://zeus.certora.com)_
+_Powered by [Auto Prover](https://zeus.certora.com)_
 `;
 }

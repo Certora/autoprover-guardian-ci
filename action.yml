@@ -1,6 +1,6 @@
-name: "Zeus Guardian CI"
-description: "Run Zeus security audits on pull request changes and create GitHub issues for findings"
-author: "zeus-audit"
+name: "Auto Prover CI"
+description: "Run Auto Prover security audits on pull request changes and create GitHub issues for findings"
+author: "auto-prover"
 
 branding:
   icon: "shield"
@@ -8,7 +8,7 @@ branding:
 
 inputs:
   api-key:
-    description: "Zeus API key (zeus_live_...)"
+    description: "Auto Prover API key"
     required: true
 
   context:
@@ -16,12 +16,12 @@ inputs:
     required: true
 
   github-token:
-    description: "GitHub token for creating issues and PR comments. Also passed to Zeus for private repo access."
+    description: "GitHub token for creating issues and PR comments. Also passed to Auto Prover for private repo access."
     required: true
     default: "${{ github.token }}"
 
   api-base-url:
-    description: "Zeus API base URL"
+    description: "Auto Prover API base URL"
     required: false
     default: "https://zeus.certora.com"
 
@@ -39,7 +39,7 @@ inputs:
     required: false
 
   use-memory:
-    description: "Use Zeus repo memory for full audits. Set to false to skip previously accepted assumptions."
+    description: "Use Auto Prover repo memory for full audits. Set to false to skip previously accepted assumptions."
     required: false
     default: "true"
 
@@ -86,11 +86,11 @@ inputs:
   labels:
     description: "Comma-separated labels to add to created issues"
     required: false
-    default: "zeus-audit,security"
+    default: "auto-prover,security"
 
 outputs:
   job-id:
-    description: "Zeus audit job ID"
+    description: "Auto Prover audit job ID"
 
   status:
     description: "Final audit status (succeeded, failed, cancelled)"

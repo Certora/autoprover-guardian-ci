@@ -127,7 +127,7 @@ export function getConfig(): ActionConfig {
     ),
     commentOnPr: core.getInput("comment-on-pr") !== "false",
     failOn: parseSeverities(core.getInput("fail-on") || ""),
-    labels: (core.getInput("labels") || "zeus-audit,security")
+    labels: (core.getInput("labels") || "auto-prover,security")
       .split(",")
       .map((l) => l.trim())
       .filter(Boolean),

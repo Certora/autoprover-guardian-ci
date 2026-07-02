@@ -32,18 +32,33 @@ function getFindingsBySeverities(
   return result;
 }
 
+function firstFiniteNumber(...values: (number | undefined)[]): number | null {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function formatUsd(value: number | null): string {
+  return value === null ? "unavailable" : `$${value.toFixed(2)}`;
+}
+
 // Track active audit for cancellation on SIGTERM/SIGINT
 let activeAudit: { api: ZeusApi; jobId: string } | null = null;
 
 function registerShutdownHandlers() {
   const handler = async (signal: string) => {
     if (activeAudit) {
-      core.info(`Received ${signal} — cancelling Zeus audit ${activeAudit.jobId}...`);
+      core.info(
+        `Received ${signal} — cancelling Auto Prover audit ${activeAudit.jobId}...`
+      );
       try {
         await activeAudit.api.cancelAudit(activeAudit.jobId);
-        core.info("Zeus audit cancelled.");
+        core.info("Auto Prover audit cancelled.");
       } catch {
-        core.warning("Failed to cancel Zeus audit on shutdown.");
+        core.warning("Failed to cancel Auto Prover audit on shutdown.");
       }
     }
     process.exit(1);
@@ -98,8 +113,14 @@ async function run(): Promise<void> {
   const jobId = createResponse.job_id;
   activeAudit = { api, jobId };
   core.setOutput("job-id", jobId);
+  const remainingBalance = firstFiniteNumber(
+    createResponse.current_balance_usd,
+    createResponse.remaining_credits
+  );
   core.info(
-    `Audit created: ${jobId} (${createResponse.remaining_credits} credits remaining)`
+    remainingBalance === null
+      ? `Audit created: ${jobId}`
+      : `Audit created: ${jobId} (${formatUsd(remainingBalance)} balance remaining)`
   );
 
   // ── Phase 3: Poll for Completion ──
@@ -132,12 +153,16 @@ async function run(): Promise<void> {
       const progress = await api.getProgress(jobId);
       consecutiveFailures = 0;
       finalStatus = progress.status;
+      const currentCost = firstFiniteNumber(
+        progress.billed_amount_usd,
+        progress.actual_cost_usd
+      );
 
       core.info(
         `[${Math.round(elapsed / 60000)}m] Status: ${progress.status} | ` +
           `Phase: ${progress.current_phase} | ` +
           `Progress: ${progress.progress_percent.toFixed(1)}% | ` +
-          `Cost: $${progress.actual_cost_usd.toFixed(2)}`
+          `Cost: ${formatUsd(currentCost)}`
       );
 
       if (
@@ -156,7 +181,7 @@ async function run(): Promise<void> {
       if (consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
         core.setOutput("status", "failed");
         core.setFailed(
-          `Lost connection to Zeus API after ${MAX_CONSECUTIVE_POLL_FAILURES} consecutive failures.`
+          `Lost connection to Auto Prover API after ${MAX_CONSECUTIVE_POLL_FAILURES} consecutive failures.`
         );
         return;
       }
@@ -256,10 +281,12 @@ async function run(): Promise<void> {
   core.info("Phase 5: Posting PR comment...");
 
   if (config.commentOnPr) {
+    const billedCostUsd =
+      firstFiniteNumber(result.billed_amount_usd, result.actual_cost_usd) ?? 0;
     const comment = formatPrComment(
       findings,
       jobId,
-      result.actual_cost_usd,
+      billedCostUsd,
       issueLinks,
       config.prNumber
     );
@@ -276,7 +303,7 @@ async function run(): Promise<void> {
     }
   }
 
-  core.info("Zeus Guardian CI completed successfully.");
+  core.info("Auto Prover CI completed successfully.");
 }
 
 run().catch((error) => {
@@ -284,16 +311,18 @@ run().catch((error) => {
     switch (error.code) {
       case "invalid_api_key":
         core.setFailed(
-          "Invalid Zeus API key. Please check your ZEUS_API_KEY secret."
+          "Invalid Auto Prover API key. Please check your AI_AUDITOR_API_KEY secret."
         );
         break;
       case "insufficient_credits":
         core.setFailed(
-          "Insufficient Zeus credits. Please purchase more at https://zeus.certora.com."
+          "Insufficient Auto Prover balance. Please top up at https://zeus.certora.com."
         );
         break;
       default:
-        core.setFailed(`Zeus API error (${error.code}): ${error.message}`);
+        core.setFailed(
+          `Auto Prover API error (${error.code}): ${error.message}`
+        );
     }
   } else {
     core.setFailed(

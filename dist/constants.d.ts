@@ -1,8 +1,8 @@
 import type { Severity } from "./types";
 export declare const SEVERITY_ORDER: Record<Severity, number>;
 export declare const SEVERITY_EMOJI: Record<Severity, string>;
-export declare const SEVERITY_LABEL_PREFIX = "zeus:";
-export declare const ZEUS_AUDIT_LABEL = "zeus-audit";
+export declare const SEVERITY_LABEL_PREFIX = "auto-prover:";
+export declare const ZEUS_AUDIT_LABEL = "auto-prover";
 export declare const PR_COMMENT_MARKER = "<!-- zeus-guardian-ci -->";
 export declare const DEFAULT_POLL_INTERVAL = 60;
 export declare const DEFAULT_TIMEOUT = 120;
