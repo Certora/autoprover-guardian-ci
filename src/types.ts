@@ -7,11 +7,12 @@ export type AuditStatus =
   | "running"
   | "succeeded"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "canceled";
 
 export type FullAuditRequest = {
   target: string;
-  branch?: string;
+  branch: string;
   context: string[];
   scope?: string[];
   preprompt?: string;

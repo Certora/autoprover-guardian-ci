@@ -1,9 +1,9 @@
 export type Severity = "HIGH" | "MEDIUM" | "LOW" | "INFO";
 export type AuditType = "full" | "diff";
-export type AuditStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";
+export type AuditStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled" | "canceled";
 export type FullAuditRequest = {
     target: string;
-    branch?: string;
+    branch: string;
     context: string[];
     scope?: string[];
     preprompt?: string;

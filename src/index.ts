@@ -1,6 +1,6 @@
 import * as core from "@actions/core";
 import { getConfig } from "./config";
-import { ZeusApi, ZeusApiError } from "./api";
+import { getZeusApiErrorMessage, ZeusApi, ZeusApiError } from "./api";
 import { GitHubClient } from "./github";
 import { formatPrComment, formatLegacyPrComment } from "./format";
 import type { AuditFindings, Finding, Severity } from "./types";
@@ -308,22 +308,7 @@ async function run(): Promise<void> {
 
 run().catch((error) => {
   if (error instanceof ZeusApiError) {
-    switch (error.code) {
-      case "invalid_api_key":
-        core.setFailed(
-          "Invalid Auto Prover API key. Please check your AI_AUDITOR_API_KEY secret."
-        );
-        break;
-      case "insufficient_credits":
-        core.setFailed(
-          "Insufficient Auto Prover balance. Please top up at https://zeus.certora.com."
-        );
-        break;
-      default:
-        core.setFailed(
-          `Auto Prover API error (${error.code}): ${error.message}`
-        );
-    }
+    core.setFailed(getZeusApiErrorMessage(error));
   } else {
     core.setFailed(
       `Unexpected error: ${error instanceof Error ? error.message : String(error)}`

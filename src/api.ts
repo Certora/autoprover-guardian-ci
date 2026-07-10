@@ -7,6 +7,7 @@ import type {
   ApiErrorResponse,
   ProgressResponse,
   StatusResponse,
+  AuditStatus,
 } from "./types";
 import { MAX_RETRY_ATTEMPTS } from "./constants";
 
@@ -21,15 +22,37 @@ export class ZeusApiError extends Error {
   }
 }
 
+export function getZeusApiErrorMessage(error: ZeusApiError): string {
+  switch (error.code) {
+    case "invalid_api_key":
+      return "Invalid Auto Prover API key. Please check your AI_AUDITOR_API_KEY secret.";
+    case "insufficient_balance":
+    case "insufficient_credits":
+      return "Insufficient Auto Prover balance. Please top up at https://zeus.certora.com.";
+    default:
+      return `Auto Prover API error (${error.code}): ${error.message}`;
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type NormalizedAuditStatus = Exclude<AuditStatus, "canceled">;
+
+/** The public API accepts both spellings; action outputs use `cancelled`. */
+export function normalizeAuditStatus(
+  status: AuditStatus
+): NormalizedAuditStatus {
+  return status === "canceled" ? "cancelled" : status;
 }
 
 async function request<T>(
   url: string,
   apiKey: string,
   options: RequestInit = {},
-  retries = MAX_RETRY_ATTEMPTS
+  retries = MAX_RETRY_ATTEMPTS,
+  retryableErrorCodes: readonly string[] = []
 ): Promise<T> {
   let lastError: Error | null = null;
 
@@ -60,8 +83,12 @@ async function request<T>(
       const message =
         errorBody?.error?.message ?? `HTTP ${response.status}: ${response.statusText}`;
 
-      // Don't retry client errors (except 429)
-      if (response.status !== 429 && response.status < 500) {
+      const shouldRetry =
+        response.status === 429 ||
+        response.status >= 500 ||
+        retryableErrorCodes.includes(code);
+
+      if (!shouldRetry) {
         throw new ZeusApiError(code, message, response.status);
       }
 
@@ -96,7 +123,8 @@ export class ZeusApi {
       {
         method: "POST",
         body: JSON.stringify(body),
-      }
+      },
+      0
     );
   }
 
@@ -107,28 +135,34 @@ export class ZeusApi {
       {
         method: "POST",
         body: JSON.stringify(body),
-      }
+      },
+      0
     );
   }
 
   async getStatus(jobId: string): Promise<StatusResponse> {
-    return request<StatusResponse>(
+    const response = await request<StatusResponse>(
       `${this.baseUrl}/api/v1/audits/${jobId}`,
       this.apiKey
     );
+    return { ...response, status: normalizeAuditStatus(response.status) };
   }
 
   async getProgress(jobId: string): Promise<ProgressResponse> {
-    return request<ProgressResponse>(
+    const response = await request<ProgressResponse>(
       `${this.baseUrl}/api/v1/audits/${jobId}/progress`,
       this.apiKey
     );
+    return { ...response, status: normalizeAuditStatus(response.status) };
   }
 
   async getResult(jobId: string): Promise<AuditResultResponse> {
     return request<AuditResultResponse>(
       `${this.baseUrl}/api/v1/audits/${jobId}/result`,
-      this.apiKey
+      this.apiKey,
+      {},
+      MAX_RETRY_ATTEMPTS,
+      ["result_not_ready"]
     );
   }
 

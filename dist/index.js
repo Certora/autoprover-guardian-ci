@@ -29962,6 +29962,8 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ZeusApi = exports.ZeusApiError = void 0;
+exports.getZeusApiErrorMessage = getZeusApiErrorMessage;
+exports.normalizeAuditStatus = normalizeAuditStatus;
 const core = __importStar(__nccwpck_require__(6966));
 const constants_1 = __nccwpck_require__(5851);
 class ZeusApiError extends Error {
@@ -29975,10 +29977,25 @@ class ZeusApiError extends Error {
     }
 }
 exports.ZeusApiError = ZeusApiError;
+function getZeusApiErrorMessage(error) {
+    switch (error.code) {
+        case "invalid_api_key":
+            return "Invalid Auto Prover API key. Please check your AI_AUDITOR_API_KEY secret.";
+        case "insufficient_balance":
+        case "insufficient_credits":
+            return "Insufficient Auto Prover balance. Please top up at https://zeus.certora.com.";
+        default:
+            return `Auto Prover API error (${error.code}): ${error.message}`;
+    }
+}
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
-async function request(url, apiKey, options = {}, retries = constants_1.MAX_RETRY_ATTEMPTS) {
+/** The public API accepts both spellings; action outputs use `cancelled`. */
+function normalizeAuditStatus(status) {
+    return status === "canceled" ? "cancelled" : status;
+}
+async function request(url, apiKey, options = {}, retries = constants_1.MAX_RETRY_ATTEMPTS, retryableErrorCodes = []) {
     let lastError = null;
     for (let attempt = 0; attempt <= retries; attempt++) {
         try {
@@ -30003,8 +30020,10 @@ async function request(url, apiKey, options = {}, retries = constants_1.MAX_RETR
             }
             const code = errorBody?.error?.code ?? "unknown_error";
             const message = errorBody?.error?.message ?? `HTTP ${response.status}: ${response.statusText}`;
-            // Don't retry client errors (except 429)
-            if (response.status !== 429 && response.status < 500) {
+            const shouldRetry = response.status === 429 ||
+                response.status >= 500 ||
+                retryableErrorCodes.includes(code);
+            if (!shouldRetry) {
                 throw new ZeusApiError(code, message, response.status);
             }
             lastError = new ZeusApiError(code, message, response.status);
@@ -30034,22 +30053,24 @@ class ZeusApi {
         return request(`${this.baseUrl}/api/v1/audits`, this.apiKey, {
             method: "POST",
             body: JSON.stringify(body),
-        });
+        }, 0);
     }
     async createDiffAudit(body) {
         return request(`${this.baseUrl}/api/v1/diff-audits`, this.apiKey, {
             method: "POST",
             body: JSON.stringify(body),
-        });
+        }, 0);
     }
     async getStatus(jobId) {
-        return request(`${this.baseUrl}/api/v1/audits/${jobId}`, this.apiKey);
+        const response = await request(`${this.baseUrl}/api/v1/audits/${jobId}`, this.apiKey);
+        return { ...response, status: normalizeAuditStatus(response.status) };
     }
     async getProgress(jobId) {
-        return request(`${this.baseUrl}/api/v1/audits/${jobId}/progress`, this.apiKey);
+        const response = await request(`${this.baseUrl}/api/v1/audits/${jobId}/progress`, this.apiKey);
+        return { ...response, status: normalizeAuditStatus(response.status) };
     }
     async getResult(jobId) {
-        return request(`${this.baseUrl}/api/v1/audits/${jobId}/result`, this.apiKey);
+        return request(`${this.baseUrl}/api/v1/audits/${jobId}/result`, this.apiKey, {}, constants_1.MAX_RETRY_ATTEMPTS, ["result_not_ready"]);
     }
     async cancelAudit(jobId) {
         await request(`${this.baseUrl}/api/v1/audits/${jobId}`, this.apiKey, { method: "DELETE" }, 0 // No retries for cancel
@@ -30799,16 +30820,7 @@ async function run() {
 }
 run().catch((error) => {
     if (error instanceof api_1.ZeusApiError) {
-        switch (error.code) {
-            case "invalid_api_key":
-                core.setFailed("Invalid Auto Prover API key. Please check your AI_AUDITOR_API_KEY secret.");
-                break;
-            case "insufficient_credits":
-                core.setFailed("Insufficient Auto Prover balance. Please top up at https://zeus.certora.com.");
-                break;
-            default:
-                core.setFailed(`Auto Prover API error (${error.code}): ${error.message}`);
-        }
+        core.setFailed((0, api_1.getZeusApiErrorMessage)(error));
     }
     else {
         core.setFailed(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
