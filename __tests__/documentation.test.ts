@@ -44,7 +44,7 @@ describe("published usage documentation", () => {
     const manifest = read("action.yml");
 
     expect(readme).toMatch(
-      /launch endpoints do not\s+currently accept an idempotency key/,
+      /launch endpoints\s+do not\s+currently accept an idempotency key/,
     );
     expect(readme).toMatch(/a\s+confirmed `cancelled` run/);
     expect(readme).toContain("`cancellation_pending`");

@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { getZeusApiErrorMessage, ZeusApi, ZeusApiError } from "../src/api";
+import {
+  getZeusApiErrorMessage,
+  ZeusApi,
+  ZeusApiDeadlineError,
+  ZeusApiError,
+} from "../src/api";
 import { API_REQUEST_TIMEOUT_MS } from "../src/constants";
 
 describe("ZeusApi", () => {
@@ -75,10 +80,61 @@ describe("ZeusApi", () => {
       await expect(request).rejects.toMatchObject({
         code: "audit_backend_error",
         statusCode: 502,
+        message: expect.stringContaining(
+          "The launch outcome may be unknown; inspect the audit list before rerunning.",
+        ),
       } satisfies Partial<ZeusApiError>);
       expect(fetchMock).toHaveBeenCalledTimes(1);
     },
   );
+
+  it("warns when a launch transport failure has an ambiguous outcome", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new TypeError("socket closed"));
+    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
+
+    await expect(
+      api.createStandaloneAudit({
+        engine: "auto-prover",
+        target: "https://github.com/Certora/zeus-guardian-ci",
+        branch: "b".repeat(40),
+        pull_request_number: 42,
+        contract_path: "src/Vault.sol",
+        contract_name: "Vault",
+      }),
+    ).rejects.toMatchObject({
+      name: "ZeusApiAmbiguousLaunchError",
+      message: expect.stringContaining(
+        "The launch outcome may be unknown; inspect the audit list before rerunning.",
+      ),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("warns when a successful launch response cannot be decoded", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("{", { status: 200 }));
+    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
+
+    await expect(
+      api.createStandaloneAudit({
+        engine: "auto-foundry",
+        target: "https://github.com/Certora/zeus-guardian-ci",
+        branch: "b".repeat(40),
+        pull_request_number: 42,
+        contract_path: "src/Vault.sol",
+        contract_name: "Vault",
+      }),
+    ).rejects.toMatchObject({
+      name: "ZeusApiAmbiguousLaunchError",
+      message: expect.stringContaining(
+        "The launch outcome may be unknown; inspect the audit list before rerunning.",
+      ),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 
   it.each(["auto-prover", "auto-foundry"] as const)(
     "creates %s through the unified audits endpoint",
@@ -285,6 +341,69 @@ describe("ZeusApi", () => {
 
     await assertion;
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let nested retries exceed a caller's absolute deadline", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((_url, options) => {
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = options?.signal;
+          signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Request timed out", "AbortError")),
+            { once: true },
+          );
+        });
+      });
+    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
+
+    const progress = api.getProgress("job-1", Date.now() + 5_000);
+    const assertion =
+      expect(progress).rejects.toBeInstanceOf(ZeusApiDeadlineError);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await assertion;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports deadline expiry when the final retry consumes the remaining time", async () => {
+    vi.useFakeTimers();
+    const transientFailure = () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "audit_backend_error",
+            message: "Temporary backend failure",
+          },
+        }),
+        { status: 502 },
+      );
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(transientFailure())
+      .mockResolvedValueOnce(transientFailure())
+      .mockResolvedValueOnce(transientFailure())
+      .mockImplementationOnce((_url, options) => {
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = options?.signal;
+          signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Request timed out", "AbortError")),
+            { once: true },
+          );
+        });
+      });
+    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
+
+    const progress = api.getProgress("job-1", Date.now() + 10_000);
+    const assertion =
+      expect(progress).rejects.toBeInstanceOf(ZeusApiDeadlineError);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await assertion;
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("retries result_not_ready and returns the result once storage catches up", async () => {

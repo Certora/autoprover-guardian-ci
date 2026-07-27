@@ -1,6 +1,6 @@
 import * as core from "@actions/core";
 import { getConfig } from "./config";
-import { ZeusApi } from "./api";
+import { ZeusApi, ZeusApiDeadlineError, ZeusApiError } from "./api";
 import { GitHubClient } from "./github";
 import {
   formatPrComment,
@@ -20,7 +20,10 @@ import type {
   Severity,
   StandaloneActionConfig,
 } from "./types";
-import { MAX_CONSECUTIVE_POLL_FAILURES } from "./constants";
+import {
+  API_REQUEST_TIMEOUT_MS,
+  MAX_CONSECUTIVE_POLL_FAILURES,
+} from "./constants";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -86,13 +89,22 @@ function isAiAuditorResult(value: unknown): value is AiAuditorResult {
 function isExpectedStandaloneResult(
   result: AuditResultResponse,
   jobId: string,
-  engine: StandaloneActionConfig["engine"],
+  config: StandaloneActionConfig,
+  requireContractIdentity = false,
 ): result is AuditResultResponse & { result: AissResult } {
+  const hasContractIdentity =
+    result.contract_path !== undefined || result.contract_name !== undefined;
+  const matchesContractIdentity =
+    result.contract_path === config.contractPath &&
+    result.contract_name === config.contractName;
+
   return (
     result.job_id === jobId &&
-    result.engine === engine &&
+    result.engine === config.engine &&
     result.status === "succeeded" &&
-    isAissResult(result.result)
+    isAissResult(result.result) &&
+    (matchesContractIdentity ||
+      (!requireContractIdentity && !hasContractIdentity))
   );
 }
 
@@ -133,6 +145,72 @@ function initializeOutputs(): void {
   core.setOutput("infos-count", "0");
 }
 
+async function waitForPersistedResult(
+  api: ZeusApi,
+  jobId: string,
+  deadlineMs: number,
+  timeoutLabel: string,
+  pollIntervalMs: number,
+  finalStatus: string,
+): Promise<AuditResultResponse | null> {
+  let waitingForResult = false;
+
+  while (true) {
+    if (waitingForResult && Date.now() >= deadlineMs) {
+      core.warning(
+        `Timeout exceeded (${timeoutLabel}) while waiting for the persisted audit result. The terminal provider workflow will not be cancelled.`,
+      );
+      core.setFailed(
+        `Audit reached provider status ${finalStatus}, but its persisted result did not become available within ${timeoutLabel}.`,
+      );
+      return null;
+    }
+
+    try {
+      return await api.getResult(jobId, deadlineMs);
+    } catch (error) {
+      const retryableResultError =
+        error instanceof ZeusApiDeadlineError ||
+        (error instanceof ZeusApiError &&
+          (error.code === "result_not_ready" ||
+            error.statusCode === 429 ||
+            error.statusCode >= 500));
+      if (!retryableResultError) {
+        throw error;
+      }
+
+      waitingForResult = true;
+      const remainingMs = deadlineMs - Date.now();
+      if (remainingMs <= 0) {
+        continue;
+      }
+
+      const detail =
+        error instanceof ZeusApiError && error.code !== "result_not_ready"
+          ? ` (${error.code})`
+          : "";
+      core.info(
+        `Provider work is complete; waiting for the persisted audit result${detail}...`,
+      );
+      await sleep(Math.min(pollIntervalMs, remainingMs));
+    }
+  }
+}
+
+async function statusAfterCancellationAttempt(
+  api: ZeusApi,
+  jobId: string,
+): Promise<Awaited<ReturnType<ZeusApi["getStatus"]>> | null> {
+  try {
+    return await api.getStatus(jobId, Date.now() + API_REQUEST_TIMEOUT_MS);
+  } catch (error) {
+    core.warning(
+      `Could not verify status after cancellation: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+}
+
 async function runGeneratedFollowup(
   config: StandaloneActionConfig,
   api: ZeusApi,
@@ -141,7 +219,7 @@ async function runGeneratedFollowup(
 ): Promise<void> {
   core.info(`Verifying generated-commit follow-up for Zeus job ${jobId}...`);
   const result = await api.getResult(jobId);
-  if (!isExpectedStandaloneResult(result, jobId, config.engine)) {
+  if (!isExpectedStandaloneResult(result, jobId, config, true)) {
     throw new Error(
       "Generated follow-up received an unexpected persisted audit result.",
     );
@@ -344,9 +422,12 @@ export async function run(): Promise<void> {
   core.info("Phase 3: Polling for completion...");
   const startTime = Date.now();
   const timeoutMs = config.timeout * 60 * 1000;
+  const deadlineMs = startTime + timeoutMs;
+  let resultDeadlineMs = deadlineMs;
   const timeoutLabel = `${config.timeout} ${config.timeout === 1 ? "minute" : "minutes"}`;
   let consecutiveFailures = 0;
   let finalStatus = "pending";
+  let finalError: string | null | undefined;
   let providerTerminal = false;
 
   while (true) {
@@ -366,6 +447,30 @@ export async function run(): Promise<void> {
           `Timeout exceeded (${timeoutLabel}). Requesting cancellation...`,
         );
         const cancellation = await requestCancellation(api, jobId);
+        const authoritativeStatus = await statusAfterCancellationAttempt(
+          api,
+          jobId,
+        );
+        if (authoritativeStatus?.status === "succeeded") {
+          finalStatus = "succeeded";
+          providerTerminal = true;
+          activeAudit = null;
+          if (
+            config.engine === "ai-auditor" ||
+            authoritativeStatus.completed_at
+          ) {
+            resultDeadlineMs = Date.now() + API_REQUEST_TIMEOUT_MS;
+            core.info(
+              "The audit completed while cancellation was being requested; continuing with its successful result.",
+            );
+            break;
+          }
+          core.setOutput("status", finalStatus);
+          core.setFailed(
+            `Audit reached provider status succeeded, but final billing settlement did not finish within ${timeoutLabel}.`,
+          );
+          return;
+        }
         activeAudit = null;
         core.setOutput("status", cancellation?.status ?? "failed");
         const cancellationResult =
@@ -384,7 +489,7 @@ export async function run(): Promise<void> {
     }
 
     try {
-      const progress = await api.getProgress(jobId);
+      const progress = await api.getProgress(jobId, deadlineMs);
       finalStatus = progress.status;
       const currentCost = firstFiniteNumber(
         progress.billed_amount_usd,
@@ -406,8 +511,9 @@ export async function run(): Promise<void> {
       ) {
         providerTerminal = true;
         activeAudit = null;
-        const status = await api.getStatus(jobId);
+        const status = await api.getStatus(jobId, deadlineMs);
         finalStatus = status.status;
+        finalError = status.error;
         if (status.completed_at) break;
         core.info(
           "Provider work is complete; waiting for final billing settlement...",
@@ -438,6 +544,30 @@ export async function run(): Promise<void> {
           );
           cancellation = await requestCancellation(api, jobId);
         }
+        const authoritativeStatus = await statusAfterCancellationAttempt(
+          api,
+          jobId,
+        );
+        if (authoritativeStatus?.status === "succeeded") {
+          finalStatus = "succeeded";
+          providerTerminal = true;
+          activeAudit = null;
+          if (
+            config.engine === "ai-auditor" ||
+            authoritativeStatus.completed_at
+          ) {
+            resultDeadlineMs = Date.now() + API_REQUEST_TIMEOUT_MS;
+            core.info(
+              "The audit completed while cancellation was being requested; continuing with its successful result.",
+            );
+            break;
+          }
+          core.setOutput("status", finalStatus);
+          core.setFailed(
+            "Audit reached provider status succeeded, but final billing settlement could not be confirmed after polling failed.",
+          );
+          return;
+        }
         activeAudit = null;
         core.setOutput(
           "status",
@@ -459,15 +589,32 @@ export async function run(): Promise<void> {
       }
     }
 
-    await sleep(config.pollInterval * 1000);
+    const remainingBeforeNextPoll = deadlineMs - Date.now();
+    if (remainingBeforeNextPoll > 0) {
+      await sleep(
+        Math.min(config.pollInterval * 1000, remainingBeforeNextPoll),
+      );
+    }
   }
 
   activeAudit = null;
   core.setOutput("status", finalStatus);
 
   if (finalStatus === "failed") {
-    const status = await api.getStatus(jobId);
-    core.setFailed(`Audit failed: ${status.error ?? "Unknown error"}`);
+    if (finalError === undefined) {
+      try {
+        const status = await api.getStatus(
+          jobId,
+          Date.now() + API_REQUEST_TIMEOUT_MS,
+        );
+        finalError = status.error;
+      } catch (error) {
+        core.warning(
+          `Could not retrieve final audit failure details: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    core.setFailed(`Audit failed: ${finalError ?? "Unknown error"}`);
     return;
   }
 
@@ -478,10 +625,18 @@ export async function run(): Promise<void> {
 
   // ── Phase 4: Fetch Results & Create Issues ──
   core.info("Phase 4: Fetching results...");
-  const result = await api.getResult(jobId);
+  const result = await waitForPersistedResult(
+    api,
+    jobId,
+    resultDeadlineMs,
+    timeoutLabel,
+    config.pollInterval * 1000,
+    finalStatus,
+  );
+  if (!result) return;
 
   if (config.engine !== "ai-auditor") {
-    if (!isExpectedStandaloneResult(result, jobId, config.engine)) {
+    if (!isExpectedStandaloneResult(result, jobId, config)) {
       throw new Error(
         `${config.engine} returned an unexpected persisted audit result.`,
       );

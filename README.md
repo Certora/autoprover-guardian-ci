@@ -99,8 +99,11 @@ repository and post the configured issue/comment output; otherwise pass a
 A PAT is not a replacement for the organization GitHub App in every flow:
 
 - Private AI Auditor runs require the organization App to read the repository
-  for the unmetered cost preview. The request token is forwarded only to the
-  paid launch.
+  and every included private submodule for the unmetered cost preview. The
+  request token is forwarded only to the paid launch. If the App cannot price
+  an included submodule that the request token may expose, the launch stops
+  with `submodule_preview_incomplete`; grant App access or set
+  `skip-submodules: "true"`.
 - AutoProver and AutoFoundry can use the request token for launch, but generated
   files are written by the organization App. Connect it and authorize the
   repository before enabling generated commits.
@@ -218,8 +221,12 @@ When that trailer is present, Guardian fetches the persisted Zeus result and
 calls the idempotent generated-file endpoint to verify that the returned
 commit SHA is exactly the current PR head. It then posts the result and applies
 the original pass/fail outcome without launching or billing another audit.
-Recognized UUID trailers are revalidated against the server-side job, PR,
-artifact, and commit binding; a forged recognized marker fails closed.
+Recognized UUID trailers are revalidated against the server-side job, engine,
+contract path/name, PR, artifact, and commit binding; a forged or
+contract-mismatched recognized marker fails closed. Initial runs remain
+compatible with older result responses that omit contract identity, but a
+generated follow-up requires the current API response fields so it cannot be
+misattributed in a multi-contract workflow.
 Malformed text that does not match the exact trailer format is ignored and
 starts a normal run.
 
@@ -231,12 +238,15 @@ endpoint is idempotent for the exact generated child commit.
 
 ### Reliability and Cancellation
 
-Every Zeus API request has a 60-second deadline. Read-only lifecycle requests
-and the idempotent generated-file commit can retry transient failures. Audit
-launches are submitted only once because the public launch endpoints do not
-currently accept an idempotency key. If a launch response is lost, inspect the
-organization's audit list for the repository and commit before manually
-rerunning the workflow.
+Every Zeus API request has a 60-second per-request deadline. Lifecycle requests
+and their retries are also bounded by the remaining overall action timeout, so
+nested retries cannot extend the configured wait indefinitely. Read-only
+lifecycle requests and the idempotent generated-file commit can retry transient
+failures. Audit launches are submitted only once because public launch endpoints do not
+currently accept an idempotency key. If a launch response is
+lost, rejected by the server after it may have been accepted, or cannot be
+decoded, inspect the organization's audit list for the repository and commit
+before manually rerunning the workflow.
 
 If the configured action timeout expires, or five consecutive lifecycle polls
 fail while the provider is still running, Guardian makes one best-effort
@@ -244,7 +254,13 @@ cancellation request before exiting. The `status` output and logs distinguish a
 confirmed `cancelled` run from `cancellation_pending`; they do not claim that an
 asynchronous cancellation has already completed. Once provider work is
 terminal, Guardian waits for billing settlement and does not send a misleading
-late cancellation.
+late cancellation. If the provider reports success before the persisted audit
+result is available, Guardian continues checking at `poll-interval` until the
+same overall `timeout` expires. The explicit `result_not_ready` state and
+transient `429`/`5xx` result failures are retried within that deadline; terminal
+`4xx` result errors fail immediately. After a final cancellation attempt,
+Guardian checks authoritative status once more so a success that won the race
+continues to result handling instead of being reported as a timeout.
 
 ### Fail on HIGH Severity Findings
 

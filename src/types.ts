@@ -155,6 +155,10 @@ export type AuditResultResponse = {
   engine?: Engine;
   status: string;
   billed_amount_usd?: number;
+  /** Immutable standalone launch identity; absent on older API deployments. */
+  contract_path?: string;
+  /** Immutable standalone launch identity; absent on older API deployments. */
+  contract_name?: string;
   /** Legacy backend/private API field, not exposed by current public v1 API. */
   actual_cost_usd?: number;
   result: AiAuditorResult | AissResult | string;

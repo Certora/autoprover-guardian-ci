@@ -26,6 +26,13 @@ export class ZeusApiError extends Error {
   }
 }
 
+export class ZeusApiDeadlineError extends Error {
+  constructor() {
+    super("The configured audit timeout expired during a Zeus API request.");
+    this.name = "ZeusApiDeadlineError";
+  }
+}
+
 export function getZeusApiErrorMessage(error: ZeusApiError): string {
   switch (error.code) {
     case "invalid_api_key":
@@ -40,6 +47,16 @@ export function getZeusApiErrorMessage(error: ZeusApiError): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const AMBIGUOUS_LAUNCH_GUIDANCE =
+  "The launch outcome may be unknown; inspect the audit list before rerunning.";
+
+function ambiguousLaunchError(error: unknown): Error {
+  const detail = error instanceof Error ? error.message : String(error);
+  const wrapped = new Error(`${detail} ${AMBIGUOUS_LAUNCH_GUIDANCE}`);
+  wrapped.name = "ZeusApiAmbiguousLaunchError";
+  return wrapped;
 }
 
 type NormalizedAuditStatus = Exclude<AuditStatus, "canceled">;
@@ -57,15 +74,21 @@ async function request<T>(
   options: RequestInit = {},
   retries = MAX_RETRY_ATTEMPTS,
   retryableErrorCodes: readonly string[] = [],
+  deadlineMs?: number,
 ): Promise<T> {
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
+    const remainingMs =
+      deadlineMs === undefined
+        ? API_REQUEST_TIMEOUT_MS
+        : deadlineMs - Date.now();
+    if (remainingMs <= 0) {
+      throw new ZeusApiDeadlineError();
+    }
+    const requestTimeoutMs = Math.min(API_REQUEST_TIMEOUT_MS, remainingMs);
     const controller = new AbortController();
-    const timeout = setTimeout(
-      () => controller.abort(),
-      API_REQUEST_TIMEOUT_MS,
-    );
+    const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
     try {
       const response = await fetch(url, {
         ...options,
@@ -103,7 +126,14 @@ async function request<T>(
         throw new ZeusApiError(code, message, response.status);
       }
 
-      lastError = new ZeusApiError(code, message, response.status);
+      lastError =
+        options.method === "POST" && retries === 0 && response.status >= 500
+          ? new ZeusApiError(
+              code,
+              `${message} ${AMBIGUOUS_LAUNCH_GUIDANCE}`,
+              response.status,
+            )
+          : new ZeusApiError(code, message, response.status);
     } catch (error) {
       if (
         error instanceof ZeusApiError &&
@@ -113,24 +143,41 @@ async function request<T>(
         throw error;
       }
       if (error instanceof Error && error.name === "AbortError") {
-        const timeoutSeconds = API_REQUEST_TIMEOUT_MS / 1000;
+        if (deadlineMs !== undefined && deadlineMs - Date.now() <= 0) {
+          throw new ZeusApiDeadlineError();
+        }
+        const timeoutSeconds = Math.ceil(requestTimeoutMs / 1000);
         const ambiguousLaunch =
           options.method === "POST" && retries === 0
-            ? " The launch outcome may be unknown; inspect the audit list before rerunning."
+            ? ` ${AMBIGUOUS_LAUNCH_GUIDANCE}`
             : "";
         lastError = new Error(
           `Zeus API request timed out after ${timeoutSeconds} seconds.${ambiguousLaunch}`,
         );
         lastError.name = "ZeusApiTimeoutError";
       } else {
-        lastError = error instanceof Error ? error : new Error(String(error));
+        lastError =
+          options.method === "POST" &&
+          retries === 0 &&
+          !(error instanceof ZeusApiError)
+            ? ambiguousLaunchError(error)
+            : error instanceof Error
+              ? error
+              : new Error(String(error));
       }
     } finally {
       clearTimeout(timeout);
     }
 
     if (attempt < retries) {
-      const delay = Math.min(1000 * 2 ** attempt, 30000);
+      const remainingBeforeRetry =
+        deadlineMs === undefined
+          ? Number.POSITIVE_INFINITY
+          : deadlineMs - Date.now();
+      if (remainingBeforeRetry <= 0) {
+        throw new ZeusApiDeadlineError();
+      }
+      const delay = Math.min(1000 * 2 ** attempt, 30000, remainingBeforeRetry);
       core.info(
         `Request failed, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${retries})...`,
       );
@@ -185,29 +232,44 @@ export class ZeusApi {
     );
   }
 
-  async getStatus(jobId: string): Promise<StatusResponse> {
+  async getStatus(jobId: string, deadlineMs?: number): Promise<StatusResponse> {
     const response = await request<StatusResponse>(
       `${this.baseUrl}/api/v1/audits/${jobId}`,
       this.apiKey,
+      {},
+      MAX_RETRY_ATTEMPTS,
+      [],
+      deadlineMs,
     );
     return { ...response, status: normalizeAuditStatus(response.status) };
   }
 
-  async getProgress(jobId: string): Promise<ProgressResponse> {
+  async getProgress(
+    jobId: string,
+    deadlineMs?: number,
+  ): Promise<ProgressResponse> {
     const response = await request<ProgressResponse>(
       `${this.baseUrl}/api/v1/audits/${jobId}/progress`,
       this.apiKey,
+      {},
+      MAX_RETRY_ATTEMPTS,
+      [],
+      deadlineMs,
     );
     return { ...response, status: normalizeAuditStatus(response.status) };
   }
 
-  async getResult(jobId: string): Promise<AuditResultResponse> {
+  async getResult(
+    jobId: string,
+    deadlineMs?: number,
+  ): Promise<AuditResultResponse> {
     return request<AuditResultResponse>(
       `${this.baseUrl}/api/v1/audits/${jobId}/result`,
       this.apiKey,
       {},
       MAX_RETRY_ATTEMPTS,
       ["result_not_ready"],
+      deadlineMs,
     );
   }
 

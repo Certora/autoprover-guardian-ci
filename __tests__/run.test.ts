@@ -8,6 +8,8 @@ const {
   setOutputMock,
   upsertPrCommentMock,
   warningMock,
+  ZeusApiDeadlineErrorMock,
+  ZeusApiErrorMock,
 } = vi.hoisted(() => ({
   apiMethods: {
     createStandaloneAudit: vi.fn(),
@@ -25,6 +27,22 @@ const {
   setOutputMock: vi.fn(),
   upsertPrCommentMock: vi.fn(),
   warningMock: vi.fn(),
+  ZeusApiDeadlineErrorMock: class ZeusApiDeadlineErrorMock extends Error {
+    constructor() {
+      super("The configured audit timeout expired during a Zeus API request.");
+      this.name = "ZeusApiDeadlineError";
+    }
+  },
+  ZeusApiErrorMock: class ZeusApiErrorMock extends Error {
+    constructor(
+      public code: string,
+      message: string,
+      public statusCode: number,
+    ) {
+      super(message);
+      this.name = "ZeusApiError";
+    }
+  },
 }));
 
 vi.mock("@actions/core", () => ({
@@ -42,6 +60,8 @@ vi.mock("../src/api", () => ({
   ZeusApi: vi.fn(function ZeusApi() {
     return apiMethods;
   }),
+  ZeusApiDeadlineError: ZeusApiDeadlineErrorMock,
+  ZeusApiError: ZeusApiErrorMock,
 }));
 
 vi.mock("../src/github", () => ({
@@ -88,12 +108,58 @@ function standaloneConfig(engine: StandaloneEngine = "auto-prover") {
   };
 }
 
+function aiAuditorConfig() {
+  return {
+    engine: "ai-auditor" as const,
+    apiKey: "zeus_live_test",
+    apiBaseUrl: "https://zeus.certora.com",
+    githubToken: "ghs_test",
+    pollInterval: 10,
+    timeout: 1,
+    commentOnPr: false,
+    target: "https://github.com/Certora/contracts",
+    branchStarting: "a".repeat(40),
+    branchEnding: HEAD_SHA,
+    prNumber: 42,
+    auditType: "diff" as const,
+    context: ["contracts/**/*.sol"],
+    useMemory: true,
+    maxIterations: 6,
+    skipSubmodules: false,
+    createIssues: false,
+    issueSeverities: ["HIGH", "MEDIUM"] as const,
+    failOn: [] as const,
+    labels: ["ai-auditor", "security"],
+  };
+}
+
+function aiAuditorResult() {
+  return {
+    job_id: "job-1",
+    engine: "ai-auditor" as const,
+    status: "succeeded",
+    billed_amount_usd: 12.5,
+    result: {
+      config: {},
+      findings: {
+        highs: [],
+        mediums: [],
+        lows: [],
+        infos: [],
+      },
+    },
+  };
+}
+
 function structuredResult(
   outcome: Outcome,
   options: {
     engine?: StandaloneEngine;
     jobId?: string;
     status?: string;
+    contractPath?: string;
+    contractName?: string;
+    omitContractIdentity?: boolean;
   } = {},
 ) {
   return {
@@ -101,6 +167,12 @@ function structuredResult(
     engine: options.engine ?? "auto-prover",
     status: options.status ?? "succeeded",
     billed_amount_usd: 12.5,
+    ...(options.omitContractIdentity
+      ? {}
+      : {
+          contract_path: options.contractPath ?? "src/Vault.sol",
+          contract_name: options.contractName ?? "Vault",
+        }),
     result: {
       report_state: "ready",
       report: {
@@ -284,7 +356,8 @@ describe("standalone engine action run", () => {
       await runPromise;
 
       expect(apiMethods.getProgress).toHaveBeenCalledTimes(5);
-      expect(apiMethods.getStatus).toHaveBeenCalledTimes(5);
+      // Five settlement checks plus the final authoritative post-failure check.
+      expect(apiMethods.getStatus).toHaveBeenCalledTimes(6);
       expect(apiMethods.cancelAudit).not.toHaveBeenCalled();
       expect(setOutputMock).toHaveBeenCalledWith("status", "succeeded");
       expect(setFailedMock).toHaveBeenCalledWith(
@@ -305,6 +378,14 @@ describe("standalone engine action run", () => {
         pollInterval: 1,
       });
       apiMethods.getProgress.mockRejectedValue(new Error("API unavailable"));
+      apiMethods.getStatus.mockResolvedValue({
+        job_id: "job-1",
+        status: "running",
+        created_at: "2026-07-27T00:00:00.000Z",
+        started_at: "2026-07-27T00:01:00.000Z",
+        completed_at: null,
+        error: null,
+      });
       apiMethods.cancelAudit.mockResolvedValueOnce({
         job_id: "job-1",
         status: "cancellation_pending",
@@ -350,6 +431,14 @@ describe("standalone engine action run", () => {
         progress_percent: 25,
         billed_amount_usd: 1,
       });
+      apiMethods.getStatus.mockResolvedValue({
+        job_id: "job-1",
+        status: "running",
+        created_at: "2026-07-27T00:00:00.000Z",
+        started_at: "2026-07-27T00:01:00.000Z",
+        completed_at: null,
+        error: null,
+      });
       apiMethods.cancelAudit.mockResolvedValueOnce({
         job_id: "job-1",
         status: "cancellation_pending",
@@ -369,6 +458,54 @@ describe("standalone engine action run", () => {
       expect(setFailedMock).toHaveBeenCalledWith(
         "Audit timed out after 1 minute. Cancellation was requested and is still being reconciled.",
       );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("continues with a success that wins the final cancellation race", async () => {
+    vi.useFakeTimers();
+    try {
+      getConfigMock.mockReturnValue({
+        ...standaloneConfig(),
+        pollInterval: 60,
+        timeout: 1,
+      });
+      apiMethods.getProgress.mockResolvedValue({
+        job_id: "job-1",
+        status: "running",
+        current_phase: "generating",
+        completed_phases: 0,
+        total_phases: 2,
+        progress: 0.25,
+        progress_percent: 25,
+        billed_amount_usd: 1,
+      });
+      apiMethods.cancelAudit.mockResolvedValueOnce({
+        job_id: "job-1",
+        status: "cancelled",
+        message:
+          "The audit completed before cancellation; its report is available.",
+        cancelled_at: "2026-07-27T00:01:00.000Z",
+      });
+      apiMethods.getStatus.mockResolvedValueOnce({
+        job_id: "job-1",
+        status: "succeeded",
+        created_at: "2026-07-27T00:00:00.000Z",
+        started_at: "2026-07-27T00:00:01.000Z",
+        completed_at: "2026-07-27T00:01:00.000Z",
+        error: null,
+      });
+
+      const runPromise = run();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await runPromise;
+
+      expect(apiMethods.cancelAudit).toHaveBeenCalledWith("job-1");
+      expect(apiMethods.getResult).toHaveBeenCalledOnce();
+      expect(apiMethods.commitGeneratedFiles).toHaveBeenCalledOnce();
+      expect(setOutputMock).toHaveBeenCalledWith("status", "succeeded");
+      expect(setFailedMock).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -429,6 +566,18 @@ describe("standalone engine action run", () => {
         result: "unexpected markdown",
       },
     },
+    {
+      name: "different contract path",
+      result: structuredResult("verified", {
+        contractPath: "src/Token.sol",
+      }),
+    },
+    {
+      name: "different contract name",
+      result: structuredResult("verified", {
+        contractName: "Token",
+      }),
+    },
   ])(
     "rejects an initial standalone result with a $name",
     async ({ result }) => {
@@ -442,6 +591,17 @@ describe("standalone engine action run", () => {
       expect(upsertPrCommentMock).not.toHaveBeenCalled();
     },
   );
+
+  it("accepts an initial standalone result from an older API without contract identity", async () => {
+    apiMethods.getResult.mockResolvedValueOnce(
+      structuredResult("verified", { omitContractIdentity: true }),
+    );
+
+    await run();
+
+    expect(apiMethods.commitGeneratedFiles).toHaveBeenCalledOnce();
+    expect(setFailedMock).not.toHaveBeenCalled();
+  });
 
   it("supports a successful generated-file response from an older API deployment", async () => {
     apiMethods.commitGeneratedFiles.mockResolvedValueOnce({
@@ -686,6 +846,27 @@ describe("standalone engine action run", () => {
         status: "failed",
       }),
     },
+    {
+      name: "different contract path",
+      result: structuredResult("verified", {
+        jobId: FOLLOWUP_JOB_ID,
+        contractPath: "src/Token.sol",
+      }),
+    },
+    {
+      name: "different contract name",
+      result: structuredResult("verified", {
+        jobId: FOLLOWUP_JOB_ID,
+        contractName: "Token",
+      }),
+    },
+    {
+      name: "missing contract identity",
+      result: structuredResult("verified", {
+        jobId: FOLLOWUP_JOB_ID,
+        omitContractIdentity: true,
+      }),
+    },
   ])(
     "rejects a follow-up with a $name persisted result",
     async ({ result }) => {
@@ -700,4 +881,192 @@ describe("standalone engine action run", () => {
       expect(apiMethods.commitGeneratedFiles).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("AI Auditor result settlement", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getConfigMock.mockReturnValue(aiAuditorConfig());
+    apiMethods.createDiffAudit.mockResolvedValue({
+      job_id: "job-1",
+      status: "pending",
+      current_balance_usd: 100,
+    });
+    apiMethods.getProgress.mockResolvedValue({
+      job_id: "job-1",
+      status: "succeeded",
+      current_phase: "complete",
+      completed_phases: 1,
+      total_phases: 1,
+      progress: 1,
+      progress_percent: 100,
+      billed_amount_usd: 12.5,
+    });
+    apiMethods.cancelAudit.mockResolvedValue({
+      job_id: "job-1",
+      status: "cancelled",
+      message: "Audit cancelled.",
+      cancelled_at: "2026-07-27T00:05:00.000Z",
+    });
+  });
+
+  it("keeps polling for a delayed persisted result without relaunching", async () => {
+    vi.useFakeTimers();
+    try {
+      apiMethods.getResult
+        .mockRejectedValueOnce(
+          new ZeusApiErrorMock(
+            "result_not_ready",
+            "Result settlement is still pending",
+            400,
+          ),
+        )
+        .mockRejectedValueOnce(
+          new ZeusApiErrorMock(
+            "result_not_ready",
+            "Result settlement is still pending",
+            400,
+          ),
+        )
+        .mockResolvedValueOnce(aiAuditorResult());
+
+      const runPromise = run();
+      await vi.advanceTimersByTimeAsync(20_000);
+      await runPromise;
+
+      expect(apiMethods.createDiffAudit).toHaveBeenCalledOnce();
+      expect(apiMethods.getProgress).toHaveBeenCalledOnce();
+      expect(apiMethods.getResult).toHaveBeenCalledTimes(3);
+      expect(apiMethods.cancelAudit).not.toHaveBeenCalled();
+      expect(setOutputMock).toHaveBeenCalledWith("status", "succeeded");
+      expect(setFailedMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the remaining timeout after transient result-storage failures", async () => {
+    vi.useFakeTimers();
+    try {
+      apiMethods.getResult
+        .mockRejectedValueOnce(
+          new ZeusApiErrorMock(
+            "result_unavailable",
+            "Result storage is temporarily unavailable",
+            502,
+          ),
+        )
+        .mockRejectedValueOnce(
+          new ZeusApiErrorMock(
+            "github_rate_limited",
+            "Result storage is temporarily rate limited",
+            429,
+          ),
+        )
+        .mockResolvedValueOnce(aiAuditorResult());
+
+      const runPromise = run();
+      await vi.advanceTimersByTimeAsync(20_000);
+      await runPromise;
+
+      expect(apiMethods.getResult).toHaveBeenCalledTimes(3);
+      expect(apiMethods.cancelAudit).not.toHaveBeenCalled();
+      expect(setOutputMock).toHaveBeenCalledWith("status", "succeeded");
+      expect(setFailedMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops persistent transient result failures at the overall timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      apiMethods.getResult.mockRejectedValue(
+        new ZeusApiErrorMock(
+          "result_unavailable",
+          "Result storage is temporarily unavailable",
+          502,
+        ),
+      );
+
+      const runPromise = run();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await runPromise;
+
+      expect(apiMethods.getResult).toHaveBeenCalledTimes(6);
+      expect(apiMethods.cancelAudit).not.toHaveBeenCalled();
+      expect(setFailedMock).toHaveBeenCalledWith(
+        "Audit reached provider status succeeded, but its persisted result did not become available within 1 minute.",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops result settlement polling at the overall action timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      apiMethods.getResult.mockRejectedValue(
+        new ZeusApiErrorMock(
+          "result_not_ready",
+          "Result settlement is still pending",
+          400,
+        ),
+      );
+
+      const runPromise = run();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await runPromise;
+
+      expect(apiMethods.createDiffAudit).toHaveBeenCalledOnce();
+      expect(apiMethods.getResult).toHaveBeenCalledTimes(6);
+      expect(apiMethods.cancelAudit).not.toHaveBeenCalled();
+      expect(setFailedMock).toHaveBeenCalledWith(
+        "Audit reached provider status succeeded, but its persisted result did not become available within 1 minute.",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("propagates terminal result errors without retrying or relaunching", async () => {
+    const terminalError = new ZeusApiErrorMock(
+      "audit_result_invalid",
+      "Persisted audit result is invalid",
+      422,
+    );
+    apiMethods.getResult.mockRejectedValueOnce(terminalError);
+
+    await expect(run()).rejects.toBe(terminalError);
+
+    expect(apiMethods.createDiffAudit).toHaveBeenCalledOnce();
+    expect(apiMethods.getProgress).toHaveBeenCalledOnce();
+    expect(apiMethods.getResult).toHaveBeenCalledOnce();
+    expect(apiMethods.cancelAudit).not.toHaveBeenCalled();
+    expect(setFailedMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves a failed audit when its diagnostic status request also fails", async () => {
+    apiMethods.getProgress.mockResolvedValueOnce({
+      job_id: "job-1",
+      status: "failed",
+      current_phase: "failed",
+      completed_phases: 1,
+      total_phases: 1,
+      progress: 1,
+      progress_percent: 100,
+      billed_amount_usd: 0,
+    });
+    apiMethods.getStatus.mockRejectedValueOnce(new ZeusApiDeadlineErrorMock());
+
+    await run();
+
+    expect(setOutputMock).toHaveBeenCalledWith("status", "failed");
+    expect(warningMock).toHaveBeenCalledWith(
+      expect.stringContaining("Could not retrieve final audit failure details"),
+    );
+    expect(setFailedMock).toHaveBeenCalledWith("Audit failed: Unknown error");
+    expect(apiMethods.getResult).not.toHaveBeenCalled();
+    expect(apiMethods.cancelAudit).not.toHaveBeenCalled();
+  });
 });
