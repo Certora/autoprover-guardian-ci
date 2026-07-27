@@ -29980,12 +29980,12 @@ exports.ZeusApiError = ZeusApiError;
 function getZeusApiErrorMessage(error) {
     switch (error.code) {
         case "invalid_api_key":
-            return "Invalid Auto Prover API key. Please check your AI_AUDITOR_API_KEY secret.";
+            return "Invalid Zeus API key. Check the API key supplied to this action.";
         case "insufficient_balance":
         case "insufficient_credits":
-            return "Insufficient Auto Prover balance. Please top up at https://zeus.certora.com.";
+            return "Insufficient Zeus balance. Please top up at https://zeus.certora.com.";
         default:
-            return `Auto Prover API error (${error.code}): ${error.message}`;
+            return `Zeus API error (${error.code}): ${error.message}`;
     }
 }
 function sleep(ms) {
@@ -29998,9 +29998,12 @@ function normalizeAuditStatus(status) {
 async function request(url, apiKey, options = {}, retries = constants_1.MAX_RETRY_ATTEMPTS, retryableErrorCodes = []) {
     let lastError = null;
     for (let attempt = 0; attempt <= retries; attempt++) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), constants_1.API_REQUEST_TIMEOUT_MS);
         try {
             const response = await fetch(url, {
                 ...options,
+                signal: controller.signal,
                 headers: {
                     "X-API-Key": apiKey,
                     "Content-Type": "application/json",
@@ -30019,7 +30022,8 @@ async function request(url, apiKey, options = {}, retries = constants_1.MAX_RETR
                 // Ignore JSON parse failure
             }
             const code = errorBody?.error?.code ?? "unknown_error";
-            const message = errorBody?.error?.message ?? `HTTP ${response.status}: ${response.statusText}`;
+            const message = errorBody?.error?.message ??
+                `HTTP ${response.status}: ${response.statusText}`;
             const shouldRetry = response.status === 429 ||
                 response.status >= 500 ||
                 retryableErrorCodes.includes(code);
@@ -30029,10 +30033,25 @@ async function request(url, apiKey, options = {}, retries = constants_1.MAX_RETR
             lastError = new ZeusApiError(code, message, response.status);
         }
         catch (error) {
-            if (error instanceof ZeusApiError && error.statusCode < 500 && error.statusCode !== 429) {
+            if (error instanceof ZeusApiError &&
+                error.statusCode < 500 &&
+                error.statusCode !== 429) {
                 throw error;
             }
-            lastError = error instanceof Error ? error : new Error(String(error));
+            if (error instanceof Error && error.name === "AbortError") {
+                const timeoutSeconds = constants_1.API_REQUEST_TIMEOUT_MS / 1000;
+                const ambiguousLaunch = options.method === "POST" && retries === 0
+                    ? " The launch outcome may be unknown; inspect the audit list before rerunning."
+                    : "";
+                lastError = new Error(`Zeus API request timed out after ${timeoutSeconds} seconds.${ambiguousLaunch}`);
+                lastError.name = "ZeusApiTimeoutError";
+            }
+            else {
+                lastError = error instanceof Error ? error : new Error(String(error));
+            }
+        }
+        finally {
+            clearTimeout(timeout);
         }
         if (attempt < retries) {
             const delay = Math.min(1000 * 2 ** attempt, 30000);
@@ -30061,6 +30080,12 @@ class ZeusApi {
             body: JSON.stringify(body),
         }, 0);
     }
+    async createStandaloneAudit(body) {
+        return request(`${this.baseUrl}/api/v1/audits`, this.apiKey, {
+            method: "POST",
+            body: JSON.stringify(body),
+        }, 0);
+    }
     async getStatus(jobId) {
         const response = await request(`${this.baseUrl}/api/v1/audits/${jobId}`, this.apiKey);
         return { ...response, status: normalizeAuditStatus(response.status) };
@@ -30073,8 +30098,13 @@ class ZeusApi {
         return request(`${this.baseUrl}/api/v1/audits/${jobId}/result`, this.apiKey, {}, constants_1.MAX_RETRY_ATTEMPTS, ["result_not_ready"]);
     }
     async cancelAudit(jobId) {
-        await request(`${this.baseUrl}/api/v1/audits/${jobId}`, this.apiKey, { method: "DELETE" }, 0 // No retries for cancel
-        );
+        return request(`${this.baseUrl}/api/v1/audits/${jobId}`, this.apiKey, { method: "DELETE" }, 0);
+    }
+    async commitGeneratedFiles(jobId, body) {
+        return request(`${this.baseUrl}/api/v1/audits/${jobId}/generated-files/commit`, this.apiKey, {
+            method: "POST",
+            body: JSON.stringify(body),
+        }, constants_1.MAX_RETRY_ATTEMPTS, ["generated_files_not_ready"]);
     }
 }
 exports.ZeusApi = ZeusApi;
@@ -30126,6 +30156,13 @@ const core = __importStar(__nccwpck_require__(6966));
 const github = __importStar(__nccwpck_require__(4903));
 const constants_1 = __nccwpck_require__(5851);
 const VALID_SEVERITIES = new Set(["HIGH", "MEDIUM", "LOW", "INFO"]);
+const VALID_ENGINES = new Set([
+    "ai-auditor",
+    "auto-prover",
+    "auto-foundry",
+]);
+const SOLIDITY_IDENTIFIER_REGEX = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+const DOCUMENT_EXTENSIONS = new Set(["md", "markdown", "pdf"]);
 function parseSeverities(input) {
     if (!input.trim())
         return [];
@@ -30148,7 +30185,62 @@ function parseCommaSeparated(input) {
         .map((p) => p.trim())
         .filter(Boolean);
 }
+function parsePositiveInteger(input, name) {
+    const value = Number(input);
+    if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error(`${name} must be a positive integer.`);
+    }
+    return value;
+}
+function parseEngine(input) {
+    const engine = input || "ai-auditor";
+    if (!VALID_ENGINES.has(engine)) {
+        throw new Error('engine must be "ai-auditor", "auto-prover", or "auto-foundry".');
+    }
+    return engine;
+}
+function validateRepositoryPath(input, name, required) {
+    const path = input.trim();
+    if (!path) {
+        if (required) {
+            throw new Error(`${name} is required for this engine.`);
+        }
+        return undefined;
+    }
+    if (path.length > constants_1.REPOSITORY_PATH_MAX) {
+        throw new Error(`${name} must be at most ${constants_1.REPOSITORY_PATH_MAX} characters.`);
+    }
+    const segments = path.split("/");
+    if (Array.from(path).some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 32 || code === 127;
+    }) ||
+        path.startsWith("/") ||
+        path.includes("\\") ||
+        segments.some((segment) => segment === "" ||
+            segment === "." ||
+            segment === ".." ||
+            segment === "...")) {
+        throw new Error(`${name} must be a repository-relative path without traversal.`);
+    }
+    return path;
+}
+function validateDocumentPath(input, name) {
+    const path = validateRepositoryPath(input, name, false);
+    if (!path)
+        return undefined;
+    const extension = path.split(".").pop()?.toLowerCase();
+    if (!extension || !DOCUMENT_EXTENSIONS.has(extension)) {
+        throw new Error(`${name} must point to a .md, .markdown, or .pdf file.`);
+    }
+    return path;
+}
 function getConfig() {
+    const apiConfig = {
+        apiKey: core.getInput("api-key", { required: true }),
+        apiBaseUrl: (core.getInput("api-base-url") || "https://zeus.certora.com").replace(/\/+$/, ""),
+        githubToken: core.getInput("github-token", { required: true }),
+    };
     const pr = github.context.payload.pull_request;
     if (!pr) {
         throw new Error("This action must be triggered by a pull_request event. No pull_request payload found.");
@@ -30163,13 +30255,64 @@ function getConfig() {
     }
     const { owner, repo } = github.context.repo;
     const target = `https://github.com/${owner}/${repo}`;
-    const contextInput = core.getInput("context", { required: true });
+    const engine = parseEngine(core.getInput("engine"));
+    if (engine === "auto-prover" || engine === "auto-foundry") {
+        const baseRepository = pr.base?.repo?.full_name;
+        const headRepository = pr.head?.repo?.full_name;
+        if (!baseRepository ||
+            !headRepository ||
+            baseRepository.toLowerCase() !== headRepository.toLowerCase()) {
+            throw new Error("AutoProver and AutoFoundry require a same-repository pull request; fork pull requests cannot receive generated files.");
+        }
+    }
+    const common = {
+        ...apiConfig,
+        pollInterval: parsePositiveInteger(core.getInput("poll-interval") || String(constants_1.DEFAULT_POLL_INTERVAL), "poll-interval"),
+        timeout: parsePositiveInteger(core.getInput("timeout") || String(constants_1.DEFAULT_TIMEOUT), "timeout"),
+        commentOnPr: core.getInput("comment-on-pr") !== "false",
+        target,
+        branchStarting: baseSha,
+        branchEnding: headSha,
+        prNumber: pr.number,
+    };
+    if (engine === "auto-prover" || engine === "auto-foundry") {
+        const contractPath = validateRepositoryPath(core.getInput("contract-path"), "contract-path", true);
+        if (!contractPath.endsWith(".sol")) {
+            throw new Error("contract-path must point to a .sol file.");
+        }
+        const contractName = core.getInput("contract-name").trim();
+        if (!contractName) {
+            throw new Error("contract-name is required for this engine.");
+        }
+        if (contractName.length > constants_1.CONTRACT_NAME_MAX) {
+            throw new Error(`contract-name must be at most ${constants_1.CONTRACT_NAME_MAX} characters.`);
+        }
+        if (!SOLIDITY_IDENTIFIER_REGEX.test(contractName)) {
+            throw new Error("contract-name must be a valid Solidity identifier.");
+        }
+        const designDocPath = validateDocumentPath(core.getInput("design-doc-path"), "design-doc-path");
+        const threatModelPath = validateDocumentPath(core.getInput("threat-model-path"), "threat-model-path");
+        if (engine === "auto-foundry" && threatModelPath) {
+            throw new Error("threat-model-path is only supported by auto-prover.");
+        }
+        return {
+            ...common,
+            engine,
+            contractPath,
+            contractName,
+            designDocPath,
+            threatModelPath,
+        };
+    }
+    const contextInput = core.getInput("context");
     const context = parseCommaSeparated(contextInput);
     if (context.length === 0) {
         throw new Error("At least one context pattern is required.");
     }
-    const maxIterations = parseInt(core.getInput("max-iterations") || String(constants_1.DEFAULT_MAX_ITERATIONS), 10);
-    if (isNaN(maxIterations) || maxIterations < 4 || maxIterations > 10) {
+    const maxIterations = Number(core.getInput("max-iterations") || String(constants_1.DEFAULT_MAX_ITERATIONS));
+    if (!Number.isSafeInteger(maxIterations) ||
+        maxIterations < 4 ||
+        maxIterations > 10) {
         throw new Error("max-iterations must be between 4 and 10.");
     }
     const auditTypeInput = core.getInput("audit-type") || "diff";
@@ -30198,30 +30341,23 @@ function getConfig() {
     const scopeInput = core.getInput("scope") || "";
     const scope = parseCommaSeparated(scopeInput);
     return {
-        apiKey: core.getInput("api-key", { required: true }),
-        apiBaseUrl: (core.getInput("api-base-url") || "https://zeus.certora.com").replace(/\/$/, ""),
+        ...common,
+        engine,
         auditType,
         context,
         scope: scope.length > 0 ? scope : undefined,
-        githubToken: core.getInput("github-token", { required: true }),
         preprompt: core.getInput("preprompt") || undefined,
         useMemory: core.getInput("use-memory") !== "false",
         maxIterations,
         skipSubmodules: core.getInput("skip-submodules") === "true",
-        pollInterval: parseInt(core.getInput("poll-interval") || String(constants_1.DEFAULT_POLL_INTERVAL), 10),
-        timeout: parseInt(core.getInput("timeout") || String(constants_1.DEFAULT_TIMEOUT), 10),
         createIssues: core.getInput("create-issues") !== "false",
         issueSeverities: parseSeverities(core.getInput("issue-severities") || "HIGH,MEDIUM"),
         commentOnPr: core.getInput("comment-on-pr") !== "false",
         failOn: parseSeverities(core.getInput("fail-on") || ""),
-        labels: (core.getInput("labels") || "auto-prover,security")
+        labels: (core.getInput("labels") || "ai-auditor,security")
             .split(",")
             .map((l) => l.trim())
             .filter(Boolean),
-        target,
-        branchStarting: baseSha,
-        branchEnding: headSha,
-        prNumber: pr.number,
     };
 }
 
@@ -30234,7 +30370,7 @@ function getConfig() {
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MAX_CONSECUTIVE_POLL_FAILURES = exports.MAX_RETRY_ATTEMPTS = exports.SHA_REGEX = exports.DEFAULT_MAX_ITERATIONS = exports.DEFAULT_TIMEOUT = exports.DEFAULT_POLL_INTERVAL = exports.PR_COMMENT_MARKER = exports.ZEUS_AUDIT_LABEL = exports.SEVERITY_LABEL_PREFIX = exports.SEVERITY_EMOJI = exports.SEVERITY_ORDER = void 0;
+exports.CONTRACT_NAME_MAX = exports.REPOSITORY_PATH_MAX = exports.API_REQUEST_TIMEOUT_MS = exports.MAX_CONSECUTIVE_POLL_FAILURES = exports.MAX_RETRY_ATTEMPTS = exports.SHA_REGEX = exports.DEFAULT_MAX_ITERATIONS = exports.DEFAULT_TIMEOUT = exports.DEFAULT_POLL_INTERVAL = exports.PR_COMMENT_MARKER = exports.LEGACY_ZEUS_AUDIT_LABEL = exports.ZEUS_AUDIT_LABEL = exports.SEVERITY_LABEL_PREFIX = exports.SEVERITY_EMOJI = exports.SEVERITY_ORDER = void 0;
 exports.SEVERITY_ORDER = {
     HIGH: 0,
     MEDIUM: 1,
@@ -30247,8 +30383,9 @@ exports.SEVERITY_EMOJI = {
     LOW: "\u{1F7E1}",
     INFO: "\u{1F535}",
 };
-exports.SEVERITY_LABEL_PREFIX = "auto-prover:";
-exports.ZEUS_AUDIT_LABEL = "auto-prover";
+exports.SEVERITY_LABEL_PREFIX = "ai-auditor:";
+exports.ZEUS_AUDIT_LABEL = "ai-auditor";
+exports.LEGACY_ZEUS_AUDIT_LABEL = "auto-prover";
 exports.PR_COMMENT_MARKER = "<!-- zeus-guardian-ci -->";
 exports.DEFAULT_POLL_INTERVAL = 60;
 exports.DEFAULT_TIMEOUT = 120;
@@ -30256,6 +30393,9 @@ exports.DEFAULT_MAX_ITERATIONS = 6;
 exports.SHA_REGEX = /^[0-9a-f]{40}$/;
 exports.MAX_RETRY_ATTEMPTS = 3;
 exports.MAX_CONSECUTIVE_POLL_FAILURES = 5;
+exports.API_REQUEST_TIMEOUT_MS = 60_000;
+exports.REPOSITORY_PATH_MAX = 500;
+exports.CONTRACT_NAME_MAX = 200;
 
 
 /***/ }),
@@ -30270,9 +30410,12 @@ exports.formatIssueTitle = formatIssueTitle;
 exports.formatIssueBody = formatIssueBody;
 exports.formatPrComment = formatPrComment;
 exports.formatLegacyPrComment = formatLegacyPrComment;
+exports.isFailingStandaloneOutcome = isFailingStandaloneOutcome;
+exports.getStandaloneWarnings = getStandaloneWarnings;
+exports.formatStandalonePrComment = formatStandalonePrComment;
 const constants_1 = __nccwpck_require__(5851);
 function formatIssueTitle(finding) {
-    return `[Auto Prover] ${finding.severity}: ${finding.title} (${finding.id})`;
+    return `[AI Auditor] ${finding.severity}: ${finding.title} (${finding.id})`;
 }
 function formatIssueBody(finding, jobId, prNumber) {
     const locations = finding.locations.length > 0
@@ -30283,7 +30426,7 @@ function formatIssueBody(finding, jobId, prNumber) {
 **Severity:** ${finding.severity}
 **Locations:** ${locations}
 **Detected in:** PR #${prNumber}
-**Auto Prover Job:** \`${jobId}\`
+**AI Auditor Job:** \`${jobId}\`
 
 ### Description
 
@@ -30294,7 +30437,7 @@ ${finding.description}
 ${finding.recommendation}
 
 ---
-_This issue was automatically created by [Auto Prover](https://zeus.certora.com). To dismiss, close this issue._`;
+_This issue was automatically created by [AI Auditor](https://zeus.certora.com). To dismiss, close this issue._`;
 }
 function formatPrComment(findings, jobId, cost, issueLinks, prNumber) {
     const counts = {
@@ -30307,7 +30450,7 @@ function formatPrComment(findings, jobId, cost, issueLinks, prNumber) {
     let body;
     if (totalFindings === 0) {
         body = `${constants_1.PR_COMMENT_MARKER}
-## \u2705 Auto Prover Results — No Findings
+## \u2705 AI Auditor Results — No Findings
 
 No security issues were detected in this PR.
 
@@ -30316,7 +30459,7 @@ No security issues were detected in this PR.
     }
     else {
         body = `${constants_1.PR_COMMENT_MARKER}
-## ${constants_1.SEVERITY_EMOJI.HIGH} Auto Prover Results
+## ${constants_1.SEVERITY_EMOJI.HIGH} AI Auditor Results
 
 | Severity | Count |
 |----------|-------|
@@ -30349,12 +30492,12 @@ No security issues were detected in this PR.
         }
         body += `</details>\n`;
     }
-    body += `\n---\n_Powered by [Auto Prover](https://zeus.certora.com)_\n`;
+    body += `\n---\n_Powered by [AI Auditor](https://zeus.certora.com)_\n`;
     return body;
 }
 function formatLegacyPrComment(markdownResult, jobId, prNumber) {
     return `${constants_1.PR_COMMENT_MARKER}
-## ${constants_1.SEVERITY_EMOJI.HIGH} Auto Prover Results
+## ${constants_1.SEVERITY_EMOJI.HIGH} AI Auditor Results
 
 **Job:** \`${jobId}\` | **PR:** #${prNumber}
 
@@ -30368,8 +30511,158 @@ ${markdownResult}
 </details>
 
 ---
-_Powered by [Auto Prover](https://zeus.certora.com)_
+_Powered by [AI Auditor](https://zeus.certora.com)_
 `;
+}
+function engineDisplayName(engine) {
+    return engine === "auto-prover" ? "AutoProver" : "AutoFoundry";
+}
+function outcomeLabel(outcome, engine) {
+    if (engine === "auto-foundry") {
+        if (outcome === "verified")
+            return "Tests passed";
+        if (outcome === "verified_with_gaps")
+            return "Tests passed with gaps";
+        if (outcome === "issues_found")
+            return "Test failures found";
+        if (outcome === "partial")
+            return "Partial test run";
+        return "Unknown";
+    }
+    if (outcome === "verified")
+        return "Verified";
+    if (outcome === "verified_with_gaps")
+        return "Verified with gaps";
+    if (outcome === "issues_found")
+        return "Issues found";
+    if (outcome === "partial")
+        return "Partial";
+    return "Unknown";
+}
+function autoFoundryStatusLabel(status) {
+    const normalized = status.trim().toUpperCase();
+    if (["GOOD", "VERIFIED", "PASS", "PASSED", "SUCCESS"].includes(normalized)) {
+        return "PASSED";
+    }
+    if (["BAD", "VIOLATED", "FAIL", "FAILED", "FAILURE"].includes(normalized)) {
+        return "FAILED";
+    }
+    return status;
+}
+function isFailingStandaloneOutcome(outcome) {
+    return outcome === "issues_found";
+}
+function getStandaloneWarnings(reportState, report, engine = "auto-prover") {
+    const isFoundry = engine === "auto-foundry";
+    const warnings = [];
+    if (reportState !== "ready") {
+        warnings.push(`The structured report state is ${reportState}.`);
+    }
+    if (!report) {
+        warnings.push(isFoundry
+            ? "No structured Foundry test report was available."
+            : "No structured property report was available.");
+        return warnings;
+    }
+    if (report.outcome === "partial") {
+        warnings.push(isFoundry
+            ? "The run completed with partial Foundry test coverage."
+            : "The run completed with partial verification coverage.");
+    }
+    else if (report.outcome === "verified_with_gaps") {
+        warnings.push(isFoundry
+            ? "The executed Foundry tests passed, but test coverage has gaps."
+            : "The run verified its executed rules but has coverage gaps.");
+    }
+    else if (report.outcome === "unknown") {
+        warnings.push("The run outcome could not be determined.");
+    }
+    const skipped = Math.max(report.skipped.length, report.coverage.skippedCount);
+    if (skipped > 0) {
+        warnings.push(isFoundry
+            ? `${skipped} ${skipped === 1 ? "test objective was" : "test objectives were"} skipped.`
+            : `${skipped} ${skipped === 1 ? "property was" : "properties were"} skipped.`);
+    }
+    if (!report.coverage.propertyCoverageComplete) {
+        warnings.push(isFoundry
+            ? "Foundry test coverage is incomplete."
+            : "Property coverage is incomplete.");
+    }
+    if (report.coverage.gaveUpComponentCount > 0) {
+        warnings.push(isFoundry
+            ? `${report.coverage.gaveUpComponentCount} component test-generation ${report.coverage.gaveUpComponentCount === 1 ? "attempt was" : "attempts were"} abandoned.`
+            : `${report.coverage.gaveUpComponentCount} component verification ${report.coverage.gaveUpComponentCount === 1 ? "attempt was" : "attempts were"} abandoned.`);
+    }
+    if (report.coverage.droppedOrphanRules > 0) {
+        warnings.push(isFoundry
+            ? `${report.coverage.droppedOrphanRules} generated ${report.coverage.droppedOrphanRules === 1 ? "test was" : "tests were"} omitted from coverage.`
+            : `${report.coverage.droppedOrphanRules} orphan ${report.coverage.droppedOrphanRules === 1 ? "rule was" : "rules were"} omitted from coverage.`);
+    }
+    warnings.push(...report.coverage.warnings.map((warning) => isFoundry
+        ? warning
+            .replace(/\bproperties\b/gi, "test objectives")
+            .replace(/\bproperty\b/gi, "test objective")
+            .replace(/\brules\b/gi, "tests")
+            .replace(/\brule\b/gi, "test")
+            .replace(/\bverification\b/gi, "test execution")
+            .replace(/\bverified\b/gi, "passed")
+        : warning));
+    return [...new Set(warnings)];
+}
+function formatStandalonePrComment(args) {
+    const name = engineDisplayName(args.engine);
+    const outcome = args.report?.outcome ?? "unknown";
+    const warnings = getStandaloneWarnings(args.reportState, args.report, args.engine);
+    const generatedPaths = args.commit.files.map((file) => file.path);
+    const commitCreated = args.commit.commit_created !== false;
+    const isFoundry = args.engine === "auto-foundry";
+    const outcomeText = outcomeLabel(outcome, args.engine);
+    const firstCountLabel = isFoundry ? "Test objectives" : "Properties";
+    const secondCountLabel = isFoundry ? "Generated tests" : "Rules";
+    const coverageLabel = isFoundry ? "Test coverage" : "Coverage";
+    const countOrUnavailable = (count) => args.report ? (count ?? 0) : "Unavailable";
+    let body = `${constants_1.PR_COMMENT_MARKER}
+## ${name} Results — ${outcomeText}
+
+| Result | Value |
+|--------|-------|
+| Outcome | **${outcomeText}** |
+| Contract | ${args.report ? `\`${args.report.contractName}\`` : "Unavailable"} |
+| Report | ${args.reportState} |
+| ${firstCountLabel} | ${countOrUnavailable(args.report?.coverage.totalProperties)} |
+| ${secondCountLabel} | ${countOrUnavailable(args.report?.coverage.totalRules)} |
+| ${coverageLabel} | ${args.report ? (args.report.coverage.propertyCoverageComplete ? "Complete" : "Has gaps") : "Unavailable"} |
+| Generated files | ${generatedPaths.length} |
+| Generated commit | ${commitCreated ? "Created" : "Not needed (head unchanged)"} |
+
+**Job:** \`${args.jobId}\` | **Cost:** $${args.cost.toFixed(2)} | **Generated commit:** ${commitCreated ? `\`${args.commit.commit_sha}\`` : "None"}
+`;
+    if (args.report && args.report.ruleCounts.length > 0) {
+        body += `\n### ${isFoundry ? "Test results" : "Rule results"}\n\n| Status | Count |\n|--------|-------|\n`;
+        for (const count of args.report.ruleCounts) {
+            body += `| ${isFoundry ? autoFoundryStatusLabel(count.status) : count.status} | ${count.count} |\n`;
+        }
+    }
+    if (warnings.length > 0) {
+        body += `\n### ${isFoundry ? "Test coverage warnings" : "Coverage warnings"}\n\n`;
+        for (const warning of warnings) {
+            body += `- ${warning}\n`;
+        }
+    }
+    if (generatedPaths.length > 0) {
+        body += "\n### Generated files\n\n";
+        for (const path of generatedPaths) {
+            body += `- \`${path}\`\n`;
+        }
+    }
+    if (args.commit.renamed_files.length > 0) {
+        body += "\n### Preserved path collisions\n\n";
+        for (const renamed of args.commit.renamed_files) {
+            body += `- \`${renamed.from}\` → \`${renamed.to}\`\n`;
+        }
+    }
+    body += `\n---\n_Powered by [${name}](https://zeus.certora.com)_\n`;
+    return body;
 }
 
 
@@ -30419,6 +30712,14 @@ const core = __importStar(__nccwpck_require__(6966));
 const github = __importStar(__nccwpck_require__(4903));
 const constants_1 = __nccwpck_require__(5851);
 const format_1 = __nccwpck_require__(4923);
+function generatedJobIdFromCommitMessage(message) {
+    const lines = message.split(/\r?\n/);
+    while (lines.at(-1) === "")
+        lines.pop();
+    const trailer = lines.at(-1);
+    const match = trailer?.match(/^Zeus-Guardian-Job: ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/);
+    return match?.[1] ?? null;
+}
 class GitHubClient {
     octokit;
     owner;
@@ -30443,7 +30744,7 @@ class GitHubClient {
             }
             catch {
                 try {
-                    const color = label === constants_1.ZEUS_AUDIT_LABEL
+                    const color = label === constants_1.ZEUS_AUDIT_LABEL || label === constants_1.LEGACY_ZEUS_AUDIT_LABEL
                         ? "7B3FE4"
                         : label.startsWith(constants_1.SEVERITY_LABEL_PREFIX)
                             ? label.includes("high")
@@ -30470,13 +30771,18 @@ class GitHubClient {
     }
     async findExistingIssue(finding) {
         const title = (0, format_1.formatIssueTitle)(finding);
+        const legacyTitle = `[Auto Prover] ${finding.severity}: ${finding.title} (${finding.id})`;
         try {
             const { data } = await this.octokit.rest.search.issuesAndPullRequests({
-                q: `repo:${this.owner}/${this.repo} is:issue is:open label:${constants_1.ZEUS_AUDIT_LABEL} "${finding.id}" in:title`,
-                per_page: 5,
+                // Search by finding id, then require an exact current OR legacy title
+                // below. Omitting a label qualifier is deliberate: releases before
+                // the AI Auditor rename used `auto-prover`, while current issues use
+                // `ai-auditor`, and callers may configure their own labels.
+                q: `repo:${this.owner}/${this.repo} is:issue is:open "${finding.id}" in:title`,
+                per_page: 20,
             });
             for (const issue of data.items) {
-                if (issue.title === title) {
+                if (issue.title === title || issue.title === legacyTitle) {
                     return issue.number;
                 }
             }
@@ -30552,6 +30858,26 @@ class GitHubClient {
             core.warning(`Failed to upsert PR comment: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
+    async getGeneratedFollowupJobId(headSha) {
+        try {
+            const { data: commit } = await this.octokit.rest.repos.getCommit({
+                owner: this.owner,
+                repo: this.repo,
+                ref: headSha,
+            });
+            if (commit.sha.toLowerCase() !== headSha.toLowerCase()) {
+                throw new Error("GitHub returned a different head commit.");
+            }
+            const jobId = generatedJobIdFromCommitMessage(commit.commit.message);
+            if (jobId) {
+                core.info(`Detected generated-commit follow-up marker for Zeus job ${jobId}.`);
+            }
+            return jobId;
+        }
+        catch {
+            throw new Error("Failed to inspect the pull request head commit. Refusing to launch an audit that could duplicate a generated-commit follow-up.");
+        }
+    }
 }
 exports.GitHubClient = GitHubClient;
 
@@ -30598,6 +30924,61 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const core = __importStar(__nccwpck_require__(6966));
+const api_1 = __nccwpck_require__(7822);
+const run_1 = __nccwpck_require__(3587);
+(0, run_1.run)().catch((error) => {
+    if (error instanceof api_1.ZeusApiError) {
+        core.setFailed((0, api_1.getZeusApiErrorMessage)(error));
+    }
+    else {
+        core.setFailed(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+});
+
+
+/***/ }),
+
+/***/ 3587:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.run = run;
+const core = __importStar(__nccwpck_require__(6966));
 const config_1 = __nccwpck_require__(6878);
 const api_1 = __nccwpck_require__(7822);
 const github_1 = __nccwpck_require__(4171);
@@ -30638,19 +31019,139 @@ function firstFiniteNumber(...values) {
 function formatUsd(value) {
     return value === null ? "unavailable" : `$${value.toFixed(2)}`;
 }
+function isAissResult(value) {
+    if (!value || typeof value !== "object")
+        return false;
+    const result = value;
+    return (typeof result.report_state === "string" &&
+        Array.isArray(result.artifacts) &&
+        (result.report === null || typeof result.report === "object"));
+}
+function isAiAuditorResult(value) {
+    if (!value || typeof value !== "object")
+        return false;
+    const findings = value.findings;
+    return Boolean(findings &&
+        Array.isArray(findings.highs) &&
+        Array.isArray(findings.mediums) &&
+        Array.isArray(findings.lows) &&
+        Array.isArray(findings.infos));
+}
+function isExpectedStandaloneResult(result, jobId, engine) {
+    return (result.job_id === jobId &&
+        result.engine === engine &&
+        result.status === "succeeded" &&
+        isAissResult(result.result));
+}
+const VALID_AISS_OUTCOMES = new Set([
+    "verified",
+    "verified_with_gaps",
+    "partial",
+    "issues_found",
+    "unknown",
+]);
+function readAissOutcome(result) {
+    if (!result.report)
+        return "unknown";
+    const outcome = result.report.outcome;
+    if (!VALID_AISS_OUTCOMES.has(outcome)) {
+        throw new Error(`Unexpected standalone audit outcome: ${String(outcome)}`);
+    }
+    return outcome;
+}
+function standaloneFailureMessage(engine) {
+    return engine === "auto-foundry"
+        ? "auto-foundry found one or more failing generated tests."
+        : "auto-prover found one or more violated properties or rules.";
+}
+function initializeOutputs() {
+    core.setOutput("engine", "");
+    core.setOutput("run-outcome", "");
+    core.setOutput("generated-files", "");
+    core.setOutput("generated-commit-sha", "");
+    core.setOutput("issues-created", "");
+    core.setOutput("highs-count", "0");
+    core.setOutput("mediums-count", "0");
+    core.setOutput("lows-count", "0");
+    core.setOutput("infos-count", "0");
+}
+async function runGeneratedFollowup(config, api, ghClient, jobId) {
+    core.info(`Verifying generated-commit follow-up for Zeus job ${jobId}...`);
+    const result = await api.getResult(jobId);
+    if (!isExpectedStandaloneResult(result, jobId, config.engine)) {
+        throw new Error("Generated follow-up received an unexpected persisted audit result.");
+    }
+    const generatedCommit = await api.commitGeneratedFiles(jobId, {
+        pull_request_number: config.prNumber,
+        token: config.githubToken,
+    });
+    if (!generatedCommit.commit_created) {
+        throw new Error("Generated follow-up did not resolve to a generated commit.");
+    }
+    if (generatedCommit.commit_sha.toLowerCase() !==
+        config.branchEnding.toLowerCase()) {
+        throw new Error(`Generated follow-up commit mismatch: expected ${config.branchEnding}, received ${generatedCommit.commit_sha}.`);
+    }
+    const outcome = readAissOutcome(result.result);
+    const generatedPaths = generatedCommit.files.map((file) => file.path);
+    core.setOutput("engine", result.engine);
+    core.setOutput("job-id", jobId);
+    core.setOutput("status", result.status);
+    core.setOutput("run-outcome", outcome);
+    core.setOutput("generated-files", generatedPaths.join(","));
+    core.setOutput("generated-commit-sha", generatedCommit.commit_sha);
+    for (const warning of (0, format_1.getStandaloneWarnings)(result.result.report_state, result.result.report, config.engine)) {
+        core.warning(warning);
+    }
+    if (config.commentOnPr) {
+        const billedCostUsd = firstFiniteNumber(result.billed_amount_usd, result.actual_cost_usd) ?? 0;
+        const comment = (0, format_1.formatStandalonePrComment)({
+            engine: config.engine,
+            jobId,
+            cost: billedCostUsd,
+            reportState: result.result.report_state,
+            report: result.result.report,
+            commit: generatedCommit,
+        });
+        await ghClient.upsertPrComment(config.prNumber, comment);
+    }
+    if ((0, format_1.isFailingStandaloneOutcome)(outcome)) {
+        core.setFailed(standaloneFailureMessage(config.engine));
+        return;
+    }
+    core.info(`Confirmed ${result.engine} outcome ${outcome} for generated commit ${generatedCommit.commit_sha}.`);
+}
 // Track active audit for cancellation on SIGTERM/SIGINT
 let activeAudit = null;
+let shutdownHandlersRegistered = false;
+function cancellationSummary(response) {
+    if (response.status === "cancelled") {
+        return `Cancellation confirmed: ${response.message}`;
+    }
+    if (response.status === "cancellation_pending") {
+        return `Cancellation requested and still pending: ${response.message}`;
+    }
+    return `Audit reached a failed state: ${response.message}`;
+}
+async function requestCancellation(api, jobId) {
+    try {
+        const response = await api.cancelAudit(jobId);
+        core.info(cancellationSummary(response));
+        return response;
+    }
+    catch (error) {
+        core.warning(`Failed to request cancellation: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+    }
+}
 function registerShutdownHandlers() {
+    if (shutdownHandlersRegistered)
+        return;
+    shutdownHandlersRegistered = true;
     const handler = async (signal) => {
         if (activeAudit) {
-            core.info(`Received ${signal} — cancelling Auto Prover audit ${activeAudit.jobId}...`);
-            try {
-                await activeAudit.api.cancelAudit(activeAudit.jobId);
-                core.info("Auto Prover audit cancelled.");
-            }
-            catch {
-                core.warning("Failed to cancel Auto Prover audit on shutdown.");
-            }
+            core.info(`Received ${signal} — requesting cancellation for Zeus audit ${activeAudit.jobId}...`);
+            await requestCancellation(activeAudit.api, activeAudit.jobId);
         }
         process.exit(1);
     };
@@ -30659,20 +31160,51 @@ function registerShutdownHandlers() {
 }
 async function run() {
     registerShutdownHandlers();
+    activeAudit = null;
     // ── Phase 1: Validate Inputs ──
     core.info("Phase 1: Validating inputs...");
     const config = (0, config_1.getConfig)();
+    initializeOutputs();
+    core.setOutput("engine", config.engine);
     core.info(`Target: ${config.target}`);
-    core.info(`Audit type: ${config.auditType}`);
+    core.info(`Engine: ${config.engine}`);
     core.info(`Base SHA: ${config.branchStarting}`);
     core.info(`Head SHA: ${config.branchEnding}`);
-    core.info(`Context patterns: ${config.context.join(", ")}`);
+    if (config.engine === "ai-auditor") {
+        core.info(`Audit type: ${config.auditType}`);
+        core.info(`Context patterns: ${config.context.join(", ")}`);
+    }
+    else {
+        core.info(`Contract: ${config.contractPath} (${config.contractName})`);
+    }
     const api = new api_1.ZeusApi(config.apiBaseUrl, config.apiKey);
+    if (config.engine !== "ai-auditor") {
+        const ghClient = new github_1.GitHubClient(config.githubToken);
+        const generatedJobId = await ghClient.getGeneratedFollowupJobId(config.branchEnding);
+        if (generatedJobId) {
+            await runGeneratedFollowup(config, api, ghClient, generatedJobId);
+            return;
+        }
+    }
     // ── Phase 2: Create Audit ──
-    core.info(`Phase 2: Creating ${config.auditType} audit...`);
+    core.info(`Phase 2: Creating ${config.engine} audit...`);
     let createResponse;
-    if (config.auditType === "full") {
+    if (config.engine !== "ai-auditor") {
+        createResponse = await api.createStandaloneAudit({
+            engine: config.engine,
+            target: config.target,
+            branch: config.branchEnding,
+            pull_request_number: config.prNumber,
+            contract_path: config.contractPath,
+            contract_name: config.contractName,
+            design_doc_path: config.designDocPath,
+            threat_model_path: config.threatModelPath,
+            token: config.githubToken,
+        });
+    }
+    else if (config.auditType === "full") {
         createResponse = await api.createFullAudit({
+            engine: "ai-auditor",
             target: config.target,
             branch: config.branchEnding,
             context: config.context,
@@ -30707,44 +31239,88 @@ async function run() {
     core.info("Phase 3: Polling for completion...");
     const startTime = Date.now();
     const timeoutMs = config.timeout * 60 * 1000;
+    const timeoutLabel = `${config.timeout} ${config.timeout === 1 ? "minute" : "minutes"}`;
     let consecutiveFailures = 0;
     let finalStatus = "pending";
+    let providerTerminal = false;
     while (true) {
         const elapsed = Date.now() - startTime;
-        if (elapsed > timeoutMs) {
-            core.warning(`Timeout exceeded (${config.timeout} minutes). Cancelling audit...`);
-            try {
-                await api.cancelAudit(jobId);
-                core.info("Audit cancelled.");
+        if (elapsed >= timeoutMs) {
+            if (providerTerminal) {
+                activeAudit = null;
+                core.warning(`Timeout exceeded (${timeoutLabel}) while waiting for final billing settlement. The terminal provider workflow will not be cancelled.`);
+                core.setOutput("status", finalStatus);
+                core.setFailed(`Audit reached provider status ${finalStatus}, but final billing settlement did not finish within ${timeoutLabel}.`);
             }
-            catch {
-                core.warning("Failed to cancel audit after timeout.");
+            else {
+                core.warning(`Timeout exceeded (${timeoutLabel}). Requesting cancellation...`);
+                const cancellation = await requestCancellation(api, jobId);
+                activeAudit = null;
+                core.setOutput("status", cancellation?.status ?? "failed");
+                const cancellationResult = cancellation?.status === "cancelled"
+                    ? "Cancellation was confirmed."
+                    : cancellation?.status === "cancellation_pending"
+                        ? "Cancellation was requested and is still being reconciled."
+                        : cancellation?.status === "failed"
+                            ? "The audit reached a failed state."
+                            : "Cancellation could not be confirmed.";
+                core.setFailed(`Audit timed out after ${timeoutLabel}. ${cancellationResult}`);
             }
-            core.setOutput("status", "cancelled");
-            core.setFailed(`Audit timed out after ${config.timeout} minutes. The audit was cancelled.`);
             return;
         }
         try {
             const progress = await api.getProgress(jobId);
-            consecutiveFailures = 0;
             finalStatus = progress.status;
             const currentCost = firstFiniteNumber(progress.billed_amount_usd, progress.actual_cost_usd);
             core.info(`[${Math.round(elapsed / 60000)}m] Status: ${progress.status} | ` +
                 `Phase: ${progress.current_phase} | ` +
                 `Progress: ${progress.progress_percent.toFixed(1)}% | ` +
                 `Cost: ${formatUsd(currentCost)}`);
-            if (progress.status === "succeeded" ||
-                progress.status === "failed" ||
+            if (config.engine !== "ai-auditor" &&
+                (progress.status === "succeeded" ||
+                    progress.status === "failed" ||
+                    progress.status === "cancelled")) {
+                providerTerminal = true;
+                activeAudit = null;
+                const status = await api.getStatus(jobId);
+                finalStatus = status.status;
+                if (status.completed_at)
+                    break;
+                core.info("Provider work is complete; waiting for final billing settlement...");
+            }
+            else if (progress.status === "succeeded") {
+                break;
+            }
+            else if (progress.status === "failed" ||
                 progress.status === "cancelled") {
                 break;
             }
+            // Reset only after the entire poll iteration succeeds. In particular, a
+            // successful progress request must not erase a failure from the
+            // settlement-status request that follows it.
+            consecutiveFailures = 0;
         }
         catch (error) {
             consecutiveFailures++;
             core.warning(`Poll failed (${consecutiveFailures}/${constants_1.MAX_CONSECUTIVE_POLL_FAILURES}): ${error instanceof Error ? error.message : String(error)}`);
             if (consecutiveFailures >= constants_1.MAX_CONSECUTIVE_POLL_FAILURES) {
-                core.setOutput("status", "failed");
-                core.setFailed(`Lost connection to Auto Prover API after ${constants_1.MAX_CONSECUTIVE_POLL_FAILURES} consecutive failures.`);
+                let cancellation = null;
+                if (!providerTerminal) {
+                    core.warning("The audit is still non-terminal; requesting cancellation before the action exits.");
+                    cancellation = await requestCancellation(api, jobId);
+                }
+                activeAudit = null;
+                core.setOutput("status", providerTerminal ? finalStatus : (cancellation?.status ?? "failed"));
+                const cancellationResult = providerTerminal
+                    ? "The provider workflow was already terminal and was not cancelled."
+                    : cancellation?.status === "cancelled"
+                        ? "Cancellation was confirmed."
+                        : cancellation?.status === "cancellation_pending"
+                            ? "Cancellation was requested and is still being reconciled."
+                            : cancellation?.status === "failed"
+                                ? "The audit reached a failed state."
+                                : "Cancellation could not be confirmed.";
+                core.setFailed(`Lost connection to the Zeus API after ${constants_1.MAX_CONSECUTIVE_POLL_FAILURES} consecutive failures. ${cancellationResult}`);
                 return;
             }
         }
@@ -30764,6 +31340,56 @@ async function run() {
     // ── Phase 4: Fetch Results & Create Issues ──
     core.info("Phase 4: Fetching results...");
     const result = await api.getResult(jobId);
+    if (config.engine !== "ai-auditor") {
+        if (!isExpectedStandaloneResult(result, jobId, config.engine)) {
+            throw new Error(`${config.engine} returned an unexpected persisted audit result.`);
+        }
+        core.info("Committing generated files to the pull request branch...");
+        const generatedCommit = await api.commitGeneratedFiles(jobId, {
+            pull_request_number: config.prNumber,
+            token: config.githubToken,
+        });
+        const generatedPaths = generatedCommit.files.map((file) => file.path);
+        // Older API deployments did not return this discriminator; preserve their
+        // successful-commit behavior while honoring the explicit new no-op state.
+        const commitCreated = generatedCommit.commit_created !== false;
+        const outcome = readAissOutcome(result.result);
+        const failingOutcome = (0, format_1.isFailingStandaloneOutcome)(outcome);
+        core.setOutput("highs-count", "0");
+        core.setOutput("mediums-count", "0");
+        core.setOutput("lows-count", "0");
+        core.setOutput("infos-count", "0");
+        core.setOutput("issues-created", "");
+        core.setOutput("run-outcome", outcome);
+        core.setOutput("generated-files", generatedPaths.join(","));
+        core.setOutput("generated-commit-sha", commitCreated ? generatedCommit.commit_sha : "");
+        if (!commitCreated) {
+            core.warning("No generated files needed to be committed. The pull request head is unchanged, so the current check remains authoritative.");
+        }
+        for (const warning of (0, format_1.getStandaloneWarnings)(result.result.report_state, result.result.report, config.engine)) {
+            core.warning(warning);
+        }
+        const ghClient = new github_1.GitHubClient(config.githubToken);
+        if (config.commentOnPr) {
+            const billedCostUsd = firstFiniteNumber(result.billed_amount_usd, result.actual_cost_usd) ??
+                0;
+            const comment = (0, format_1.formatStandalonePrComment)({
+                engine: config.engine,
+                jobId,
+                cost: billedCostUsd,
+                reportState: result.result.report_state,
+                report: result.result.report,
+                commit: generatedCommit,
+            });
+            await ghClient.upsertPrComment(config.prNumber, comment);
+        }
+        if (failingOutcome) {
+            core.setFailed(standaloneFailureMessage(config.engine));
+            return;
+        }
+        core.info(`${config.engine} CI completed with outcome ${outcome} and committed ${generatedPaths.length} generated files.`);
+        return;
+    }
     // Handle legacy markdown result
     if (typeof result.result === "string") {
         core.warning("Audit returned a legacy markdown report. Structured findings are not available.");
@@ -30778,6 +31404,9 @@ async function run() {
             await ghClient.upsertPrComment(config.prNumber, comment);
         }
         return;
+    }
+    if (!isAiAuditorResult(result.result)) {
+        throw new Error("AI Auditor returned an unexpected result payload.");
     }
     const findings = result.result.findings;
     core.setOutput("highs-count", String(findings.highs.length));
@@ -30816,16 +31445,8 @@ async function run() {
             core.setFailed(`Found ${failFindings.length} findings matching fail-on severities: ${config.failOn.join(", ")}`);
         }
     }
-    core.info("Auto Prover CI completed successfully.");
+    core.info("Zeus Guardian CI completed successfully.");
 }
-run().catch((error) => {
-    if (error instanceof api_1.ZeusApiError) {
-        core.setFailed((0, api_1.getZeusApiErrorMessage)(error));
-    }
-    else {
-        core.setFailed(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
-    }
-});
 
 
 /***/ }),

@@ -1,4 +1,4 @@
-import type { AuditResultResponse, CreateAuditResponse, DiffAuditRequest, FullAuditRequest, ProgressResponse, StatusResponse, AuditStatus } from "./types";
+import type { AuditResultResponse, CancelAuditResponse, CommitGeneratedFilesRequest, CommitGeneratedFilesResponse, CreateAuditResponse, DiffAuditRequest, FullAuditRequest, ProgressResponse, StandaloneAuditRequest, StatusResponse, AuditStatus } from "./types";
 export declare class ZeusApiError extends Error {
     code: string;
     statusCode: number;
@@ -14,9 +14,11 @@ export declare class ZeusApi {
     constructor(baseUrl: string, apiKey: string);
     createFullAudit(body: FullAuditRequest): Promise<CreateAuditResponse>;
     createDiffAudit(body: DiffAuditRequest): Promise<CreateAuditResponse>;
+    createStandaloneAudit(body: StandaloneAuditRequest): Promise<CreateAuditResponse>;
     getStatus(jobId: string): Promise<StatusResponse>;
     getProgress(jobId: string): Promise<ProgressResponse>;
     getResult(jobId: string): Promise<AuditResultResponse>;
-    cancelAudit(jobId: string): Promise<void>;
+    cancelAudit(jobId: string): Promise<CancelAuditResponse>;
+    commitGeneratedFiles(jobId: string, body: CommitGeneratedFilesRequest): Promise<CommitGeneratedFilesResponse>;
 }
 export {};

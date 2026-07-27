@@ -1,7 +1,7 @@
 {
   "name": "zeus-guardian-ci",
   "version": "1.0.0",
-  "description": "GitHub Action to run Auto Prover security audits on pull requests and create issues for findings",
+  "description": "GitHub Action for AI Auditor, AutoProver, and AutoFoundry pull-request workflows",
   "main": "dist/index.js",
   "scripts": {
     "build": "ncc build src/index.ts -o dist --source-map --license licenses.txt",
@@ -9,7 +9,14 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["github-action", "security", "audit", "auto-prover"],
+  "keywords": [
+    "github-action",
+    "security",
+    "audit",
+    "ai-auditor",
+    "auto-prover",
+    "auto-foundry"
+  ],
   "license": "MIT",
   "dependencies": {
     "@actions/core": "^1.11.1",

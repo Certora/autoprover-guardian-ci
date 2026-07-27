@@ -2,6 +2,7 @@ import * as core from "@actions/core";
 import * as github from "@actions/github";
 import type { Finding, Severity } from "./types";
 import {
+  LEGACY_ZEUS_AUDIT_LABEL,
   PR_COMMENT_MARKER,
   SEVERITY_LABEL_PREFIX,
   ZEUS_AUDIT_LABEL,
@@ -9,6 +10,16 @@ import {
 import { formatIssueTitle, formatIssueBody } from "./format";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
+
+function generatedJobIdFromCommitMessage(message: string): string | null {
+  const lines = message.split(/\r?\n/);
+  while (lines.at(-1) === "") lines.pop();
+  const trailer = lines.at(-1);
+  const match = trailer?.match(
+    /^Zeus-Guardian-Job: ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/,
+  );
+  return match?.[1] ?? null;
+}
 
 export class GitHubClient {
   private octokit: Octokit;
@@ -21,7 +32,10 @@ export class GitHubClient {
     this.repo = github.context.repo.repo;
   }
 
-  async ensureLabelsExist(labels: string[], severities: Severity[]): Promise<void> {
+  async ensureLabelsExist(
+    labels: string[],
+    severities: Severity[],
+  ): Promise<void> {
     const allLabels = [
       ...labels,
       ...severities.map((s) => `${SEVERITY_LABEL_PREFIX}${s.toLowerCase()}`),
@@ -37,7 +51,7 @@ export class GitHubClient {
       } catch {
         try {
           const color =
-            label === ZEUS_AUDIT_LABEL
+            label === ZEUS_AUDIT_LABEL || label === LEGACY_ZEUS_AUDIT_LABEL
               ? "7B3FE4"
               : label.startsWith(SEVERITY_LABEL_PREFIX)
                 ? label.includes("high")
@@ -65,20 +79,25 @@ export class GitHubClient {
 
   async findExistingIssue(finding: Finding): Promise<number | null> {
     const title = formatIssueTitle(finding);
+    const legacyTitle = `[Auto Prover] ${finding.severity}: ${finding.title} (${finding.id})`;
     try {
       const { data } = await this.octokit.rest.search.issuesAndPullRequests({
-        q: `repo:${this.owner}/${this.repo} is:issue is:open label:${ZEUS_AUDIT_LABEL} "${finding.id}" in:title`,
-        per_page: 5,
+        // Search by finding id, then require an exact current OR legacy title
+        // below. Omitting a label qualifier is deliberate: releases before
+        // the AI Auditor rename used `auto-prover`, while current issues use
+        // `ai-auditor`, and callers may configure their own labels.
+        q: `repo:${this.owner}/${this.repo} is:issue is:open "${finding.id}" in:title`,
+        per_page: 20,
       });
 
       for (const issue of data.items) {
-        if (issue.title === title) {
+        if (issue.title === title || issue.title === legacyTitle) {
           return issue.number;
         }
       }
     } catch (error) {
       core.warning(
-        `Failed to search for existing issues: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to search for existing issues: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     return null;
@@ -88,7 +107,7 @@ export class GitHubClient {
     finding: Finding,
     jobId: string,
     prNumber: number,
-    labels: string[]
+    labels: string[],
   ): Promise<string | null> {
     const title = formatIssueTitle(finding);
     const severityLabel = `${SEVERITY_LABEL_PREFIX}${finding.severity.toLowerCase()}`;
@@ -106,7 +125,7 @@ export class GitHubClient {
           body: `This finding was detected again in PR #${prNumber} (Zeus Job: \`${jobId}\`).`,
         });
         core.info(
-          `Finding ${finding.id} already tracked in #${existingIssueNumber}, added recurrence comment.`
+          `Finding ${finding.id} already tracked in #${existingIssueNumber}, added recurrence comment.`,
         );
         return `#${existingIssueNumber}`;
       }
@@ -124,7 +143,7 @@ export class GitHubClient {
       return `#${issue.number}`;
     } catch (error) {
       core.warning(
-        `Failed to create/update issue for ${finding.id}: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to create/update issue for ${finding.id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }
@@ -140,8 +159,8 @@ export class GitHubClient {
         per_page: 100,
       });
 
-      const existing = comments.find(
-        (c) => c.body?.includes(PR_COMMENT_MARKER)
+      const existing = comments.find((c) =>
+        c.body?.includes(PR_COMMENT_MARKER),
       );
 
       if (existing) {
@@ -163,7 +182,31 @@ export class GitHubClient {
       }
     } catch (error) {
       core.warning(
-        `Failed to upsert PR comment: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to upsert PR comment: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  async getGeneratedFollowupJobId(headSha: string): Promise<string | null> {
+    try {
+      const { data: commit } = await this.octokit.rest.repos.getCommit({
+        owner: this.owner,
+        repo: this.repo,
+        ref: headSha,
+      });
+      if (commit.sha.toLowerCase() !== headSha.toLowerCase()) {
+        throw new Error("GitHub returned a different head commit.");
+      }
+      const jobId = generatedJobIdFromCommitMessage(commit.commit.message);
+      if (jobId) {
+        core.info(
+          `Detected generated-commit follow-up marker for Zeus job ${jobId}.`,
+        );
+      }
+      return jobId;
+    } catch {
+      throw new Error(
+        "Failed to inspect the pull request head commit. Refusing to launch an audit that could duplicate a generated-commit follow-up.",
       );
     }
   }

@@ -1,6 +1,6 @@
-name: "Auto Prover CI"
-description: "Run Auto Prover security audits on pull request changes and create GitHub issues for findings"
-author: "auto-prover"
+name: "Zeus Guardian CI"
+description: "Run AI Auditor, AutoProver, or AutoFoundry on pull requests"
+author: "Certora"
 
 branding:
   icon: "shield"
@@ -8,48 +8,53 @@ branding:
 
 inputs:
   api-key:
-    description: "Auto Prover API key"
+    description: "Zeus API key"
     required: true
+
+  engine:
+    description: 'Engine to run: "ai-auditor", "auto-prover", or "auto-foundry"'
+    required: false
+    default: "ai-auditor"
 
   context:
-    description: 'Comma-separated glob patterns for files to analyze (e.g., "contracts/**/*.sol,src/**/*.sol")'
-    required: true
+    description: "AI Auditor only: comma-separated glob patterns for files to analyze"
+    required: false
 
   github-token:
-    description: "GitHub token for creating issues and PR comments. Also passed to Auto Prover for private repo access."
+    description: "GitHub token for issues, PR comments, paid launch/validation, and generated-commit verification. Private AI previews and generated writes require the organization GitHub App."
     required: true
     default: "${{ github.token }}"
 
   api-base-url:
-    description: "Auto Prover API base URL"
+    description: "Zeus API base URL"
     required: false
     default: "https://zeus.certora.com"
 
   audit-type:
-    description: 'Audit type. Simple: "diff" or "full". Per-branch: "main:full,dev:diff" (fallback: diff).'
+    description: 'AI Auditor only: "diff", "full", or a per-branch mapping such as "main:full,dev:diff"'
     required: false
     default: "diff"
 
   scope:
-    description: 'Comma-separated scope patterns for full audits (subset of context to focus on). Only used when audit-type is "full".'
+    description: "AI Auditor only: comma-separated scope patterns for full audits (subset of context to focus on)."
     required: false
 
   preprompt:
-    description: "Custom instructions for the audit"
+    description: "AI Auditor only: custom audit instructions"
     required: false
 
   use-memory:
-    description: "Use Auto Prover repo memory for full audits. Set to false to skip previously accepted assumptions."
+    description: "Use AI Auditor repo memory for full audits. Set to false to skip previously accepted assumptions."
     required: false
     default: "true"
 
   max-iterations:
-    description: "DeepDive iterations (4-10)"
+    description: "AI Auditor only: DeepDive iterations (4-10)"
     required: false
     default: "6"
 
   skip-submodules:
-    description: "Skip git submodule loading"
+    description: "AI Auditor only: skip git submodule loading"
     required: false
     default: "false"
 
@@ -64,12 +69,12 @@ inputs:
     default: "120"
 
   create-issues:
-    description: "Create GitHub issues for findings"
+    description: "AI Auditor only: create GitHub issues for findings"
     required: false
     default: "true"
 
   issue-severities:
-    description: 'Comma-separated severities to create issues for (e.g., "HIGH,MEDIUM")'
+    description: 'AI Auditor only: comma-separated severities to create issues for (e.g., "HIGH,MEDIUM")'
     required: false
     default: "HIGH,MEDIUM"
 
@@ -79,36 +84,64 @@ inputs:
     default: "true"
 
   fail-on:
-    description: 'Fail the action if findings of these severities exist (e.g., "HIGH" or "HIGH,MEDIUM"). Empty means never fail.'
+    description: "AI Auditor only: fail if selected severities exist. Standalone engines use the fixed issues_found outcome policy."
     required: false
     default: ""
 
   labels:
-    description: "Comma-separated labels to add to created issues"
+    description: "AI Auditor only: comma-separated labels to add to created issues"
     required: false
-    default: "auto-prover,security"
+    default: "ai-auditor,security"
+
+  contract-path:
+    description: "AutoProver/AutoFoundry only: repository-relative path to one Solidity contract"
+    required: false
+
+  contract-name:
+    description: "AutoProver/AutoFoundry only: contract declaration name"
+    required: false
+
+  design-doc-path:
+    description: "AutoProver/AutoFoundry only: optional repository-relative .md, .markdown, or .pdf design document"
+    required: false
+
+  threat-model-path:
+    description: "AutoProver only: optional repository-relative .md, .markdown, or .pdf threat model"
+    required: false
 
 outputs:
   job-id:
-    description: "Auto Prover audit job ID"
+    description: "Zeus audit job ID"
 
   status:
-    description: "Final audit status (succeeded, failed, cancelled)"
+    description: "Last known audit status (succeeded, failed, cancelled, or cancellation_pending)"
 
   highs-count:
-    description: "Number of HIGH severity findings"
+    description: "AI Auditor HIGH severity finding count"
 
   mediums-count:
-    description: "Number of MEDIUM severity findings"
+    description: "AI Auditor MEDIUM severity finding count"
 
   lows-count:
-    description: "Number of LOW severity findings"
+    description: "AI Auditor LOW severity finding count"
 
   infos-count:
-    description: "Number of INFO severity findings"
+    description: "AI Auditor INFO severity finding count"
 
   issues-created:
-    description: "Comma-separated list of created issue URLs"
+    description: "AI Auditor comma-separated list of created issue references (for example, #123)"
+
+  engine:
+    description: "Engine selected for this run"
+
+  run-outcome:
+    description: "AutoProver verification or AutoFoundry test outcome (verified, verified_with_gaps, partial, issues_found, or unknown)"
+
+  generated-files:
+    description: "Comma-separated repository paths committed by AutoProver/AutoFoundry"
+
+  generated-commit-sha:
+    description: "Commit containing generated files; empty when no commit was needed"
 
 runs:
   using: "node20"

@@ -1,15 +1,29 @@
 # Zeus Guardian CI
 
-A GitHub Action that runs [Zeus](https://zeus.certora.com) security audits on pull request changes and automatically creates GitHub issues for each finding.
+A GitHub Action that runs [Zeus](https://zeus.certora.com) AI Auditor,
+AutoProver, or AutoFoundry on pull requests.
 
 ## How It Works
 
-1. When a PR is opened or updated, the action sends it to Zeus for analysis
-2. **Diff audit** (default): analyzes only the changed files between base and head commits
-3. **Full audit**: scans the entire codebase at the PR's head commit
-4. The action polls for completion and logs progress in real-time
-5. Once done, it creates GitHub issues for findings (configurable: HIGH, MEDIUM, LOW, INFO)
-6. A summary comment is always posted on the PR — even when no findings are detected, so you know Zeus ran
+1. A pull request selects one engine:
+   - **AI Auditor** (default) performs a diff or full security audit.
+   - **AutoProver** verifies generated formal properties for one Solidity contract.
+   - **AutoFoundry** generates and runs Foundry tests for one Solidity contract.
+2. The action sends the immutable PR head commit to Zeus and polls the generic
+   audit lifecycle until it completes.
+3. AI Auditor can create severity-based GitHub issues and posts its findings
+   summary.
+4. AutoProver and AutoFoundry commit any generated files to the triggering PR
+   branch. AutoProver posts a formal property/rule summary; AutoFoundry posts a
+   generated Foundry test summary. Existing user files are preserved under
+   collision-safe generated paths.
+5. The generated commit triggers the pull request workflow normally. Guardian
+   recognizes its job trailer, verifies it against Zeus and the exact PR
+   head, then reports the persisted result without running or billing another
+   audit.
+6. AutoProver and AutoFoundry fail the check only when the outcome is
+   `issues_found` (or the workflow itself fails). Partial runs and coverage
+   gaps produce warnings.
 
 ## Quick Start
 
@@ -25,7 +39,7 @@ A GitHub Action that runs [Zeus](https://zeus.certora.com) security audits on pu
 2. Navigate to **Settings > Secrets and variables > Actions**
 3. Click **New repository secret**
 4. Name: `ZEUS_API_KEY`
-5. Value: your Zeus API key (starts with `zeus_live_`)
+5. Value: your Zeus API key (starts with `live_`; legacy `zeus_live_` keys are also accepted)
 
 ### Step 3: Create the Workflow File
 
@@ -46,13 +60,19 @@ jobs:
   zeus-audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: Certora/zeus-guardian-ci@v1
+      - uses: Certora/zeus-guardian-ci@main
         with:
           api-key: ${{ secrets.ZEUS_API_KEY }}
           context: "contracts/**/*.sol"
 ```
 
 That's it. Every PR will now be audited automatically.
+
+AutoProver and AutoFoundry need `contents: read` to inspect and verify commits
+and `pull-requests: write` for their summary. Zeus commits generated files with
+the organization's connected GitHub App so GitHub emits a normal pull request
+`synchronize` event. Generated-file commits are supported only for
+same-repository pull requests whose head still matches the audited commit.
 
 ## One-Click Install from Dashboard
 
@@ -63,17 +83,33 @@ Prefer a visual setup? You can install Zeus Guardian CI directly from the Zeus d
 3. Connect your GitHub account
 4. Select the repository you want to protect
 5. Choose which branches to audit (e.g., `main`, `dev`, `staging`)
-6. Configure your settings (context patterns, severities, fail conditions)
+6. Choose an engine and configure its context or contract inputs
 7. Click **Create Pull Request**
 
-Zeus will automatically open a PR on your repository with the workflow file configured exactly as you specified. Just merge the PR, then add your `ZEUS_API_KEY` secret in **Settings > Secrets and variables > Actions**.
+Zeus will automatically open a PR on your repository with the workflow file configured exactly as you specified. Just merge the PR, then add your `AI_AUDITOR_API_KEY` secret in **Settings > Secrets and variables > Actions**.
 
 ## Private Repositories
 
-The default `GITHUB_TOKEN` may not have sufficient permissions for Zeus to clone private repositories. In that case, create a **Personal Access Token (PAT)** with `contents: read` scope and pass it:
+`github-token` is used for Guardian's GitHub operations and is forwarded for
+paid launch or repository validation. When the workflow grants the permissions
+shown above, the default `GITHUB_TOKEN` can normally read the triggering
+repository and post the configured issue/comment output; otherwise pass a
+**Personal Access Token (PAT)** with the required repository permissions.
+
+A PAT is not a replacement for the organization GitHub App in every flow:
+
+- Private AI Auditor runs require the organization App to read the repository
+  for the unmetered cost preview. The request token is forwarded only to the
+  paid launch.
+- AutoProver and AutoFoundry can use the request token for launch, but generated
+  files are written by the organization App. Connect it and authorize the
+  repository before enabling generated commits.
+
+The PAT is revalidated for generated-file follow-ups but is never used as the
+server-side generated-commit write credential.
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@main
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -92,12 +128,13 @@ on:
     branches: [main, dev, staging]
 ```
 
-### Full Audit (Entire Codebase)
+### Full Audit (Configured Context)
 
-By default, the action runs a diff audit (changed files only). Set `audit-type: "full"` to scan the entire codebase at the PR head commit:
+By default, the action runs a diff audit between the PR base and head. Set
+`audit-type: "full"` to analyze the configured `context` at the PR head commit:
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@main
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -109,7 +146,7 @@ assumptions from previous audits are sent as context so Zeus does not re-report
 them. Disable it with `use-memory: "false"`:
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@main
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -120,7 +157,7 @@ them. Disable it with `use-memory: "false"`:
 You can optionally narrow the focus with `scope`:
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@main
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -128,10 +165,91 @@ You can optionally narrow the focus with `scope`:
     scope: "contracts/src/**/*.sol"
 ```
 
+### AutoProver
+
+AutoProver targets exactly one Solidity contract. A design document and threat
+model are optional repository-relative `.md`, `.markdown`, or `.pdf` files.
+
+```yaml
+permissions:
+  pull-requests: write
+  contents: read
+
+steps:
+  - uses: Certora/zeus-guardian-ci@main
+    with:
+      api-key: ${{ secrets.ZEUS_API_KEY }}
+      engine: "auto-prover"
+      contract-path: "src/Vault.sol"
+      contract-name: "Vault"
+      design-doc-path: "docs/vault-design.md"
+      threat-model-path: "docs/vault-threat-model.md"
+```
+
+### AutoFoundry
+
+```yaml
+permissions:
+  pull-requests: write
+  contents: read
+
+steps:
+  - uses: Certora/zeus-guardian-ci@main
+    with:
+      api-key: ${{ secrets.ZEUS_API_KEY }}
+      engine: "auto-foundry"
+      contract-path: "src/Vault.sol"
+      contract-name: "Vault"
+      design-doc-path: "docs/vault-design.md"
+```
+
+`threat-model-path` is intentionally unsupported by AutoFoundry.
+
+### Generated-Commit Follow-up
+
+Committing generated files changes the pull request head SHA. Zeus uses the
+organization's connected GitHub App for that commit, so GitHub triggers the
+same `pull_request` workflow on the new head through a normal `synchronize`
+event.
+
+The generated commit ends with an exact `Zeus-Guardian-Job: <UUID>` trailer.
+Before starting a standalone audit, Guardian inspects the current head commit.
+When that trailer is present, Guardian fetches the persisted Zeus result and
+calls the idempotent generated-file endpoint to verify that the returned
+commit SHA is exactly the current PR head. It then posts the result and applies
+the original pass/fail outcome without launching or billing another audit.
+Recognized UUID trailers are revalidated against the server-side job, PR,
+artifact, and commit binding; a forged recognized marker fails closed.
+Malformed text that does not match the exact trailer format is ignored and
+starts a normal run.
+
+If a successful run produces no commit-worthy files, the API reports that the
+head is unchanged. Guardian warns, leaves `generated-commit-sha` empty, and
+uses the current check because it already belongs to that SHA. Transient
+generated-file publishing and backend failures are retried; the commit
+endpoint is idempotent for the exact generated child commit.
+
+### Reliability and Cancellation
+
+Every Zeus API request has a 60-second deadline. Read-only lifecycle requests
+and the idempotent generated-file commit can retry transient failures. Audit
+launches are submitted only once because the public launch endpoints do not
+currently accept an idempotency key. If a launch response is lost, inspect the
+organization's audit list for the repository and commit before manually
+rerunning the workflow.
+
+If the configured action timeout expires, or five consecutive lifecycle polls
+fail while the provider is still running, Guardian makes one best-effort
+cancellation request before exiting. The `status` output and logs distinguish a
+confirmed `cancelled` run from `cancellation_pending`; they do not claim that an
+asynchronous cancellation has already completed. Once provider work is
+terminal, Guardian waits for billing settlement and does not send a misleading
+late cancellation.
+
 ### Fail on HIGH Severity Findings
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@main
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -144,7 +262,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 
 ```yaml
 # Create issues for everything except INFO
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@main
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "src/**/*.sol,lib/**/*.sol"
@@ -154,7 +272,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 
 ```yaml
 # Only create issues for HIGH findings
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@main
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -163,7 +281,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 
 ```yaml
 # Create issues for all severities
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@main
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -173,7 +291,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 ### Maximum DeepDive Iterations
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@main
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -184,7 +302,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 ### Disable Issue Creation (PR Comment Only)
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@main
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -195,7 +313,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 
 ```yaml
 steps:
-  - uses: Certora/zeus-guardian-ci@v1
+  - uses: Certora/zeus-guardian-ci@main
     id: audit
     with:
       api-key: ${{ secrets.ZEUS_API_KEY }}
@@ -213,7 +331,7 @@ steps:
 If you're using a different Zeus environment (e.g., staging):
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/zeus-guardian-ci@main
   with:
     api-key: ${{ secrets.ZEUS_API_KEY }}
     context: "contracts/**/*.sol"
@@ -224,52 +342,62 @@ If you're using a different Zeus environment (e.g., staging):
 
 ## Inputs
 
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `api-key` | Yes | - | Zeus API key (`zeus_live_...`) |
-| `context` | Yes | - | Comma-separated glob patterns for files to analyze |
-| `github-token` | No | `${{ github.token }}` | GitHub token for issues/comments and private repo access |
-| `api-base-url` | No | `https://zeus.certora.com` | Zeus API base URL |
-| `audit-type` | No | `diff` | `"diff"` (changed files only) or `"full"` (entire codebase) |
-| `scope` | No | - | Comma-separated scope patterns for full audits (subset of context) |
-| `preprompt` | No | - | Custom instructions for the audit |
-| `use-memory` | No | `true` | Use repo memory for full audits; set to `false` to skip accepted assumptions |
-| `max-iterations` | No | `6` | DeepDive iterations (4-10) |
-| `skip-submodules` | No | `false` | Skip git submodule loading |
-| `poll-interval` | No | `60` | Seconds between status polls |
-| `timeout` | No | `120` | Maximum minutes to wait for completion |
-| `create-issues` | No | `true` | Create GitHub issues for findings |
-| `issue-severities` | No | `HIGH,MEDIUM` | Which severities create GitHub issues (`HIGH,MEDIUM,LOW,INFO`) |
-| `comment-on-pr` | No | `true` | Post summary comment on the PR |
-| `fail-on` | No | - | Fail the action if these severities are found |
-| `labels` | No | `zeus-audit,security` | Labels added to created issues |
+| Input               | Required               | Default                    | Description                                                                                                |
+| ------------------- | ---------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `api-key`           | Yes                    | -                          | Zeus API key (`live_...`; legacy `zeus_live_...` is accepted)                                              |
+| `engine`            | No                     | `ai-auditor`               | `ai-auditor`, `auto-prover`, or `auto-foundry`                                                             |
+| `context`           | AI Auditor             | -                          | Comma-separated glob patterns for files to analyze                                                         |
+| `github-token`      | No                     | `${{ github.token }}`      | GitHub token for output and launch validation; App still required for private AI previews/generated writes |
+| `api-base-url`      | No                     | `https://zeus.certora.com` | Zeus API base URL                                                                                          |
+| `audit-type`        | No                     | `diff`                     | AI Auditor only: `"diff"`, `"full"`, or a branch mapping                                                   |
+| `scope`             | No                     | -                          | AI Auditor only: scope patterns for full audits (subset of context)                                        |
+| `preprompt`         | No                     | -                          | AI Auditor only: custom audit instructions                                                                 |
+| `use-memory`        | No                     | `true`                     | AI Auditor only: use repo memory for full audits                                                           |
+| `max-iterations`    | No                     | `6`                        | AI Auditor only: DeepDive iterations (4-10)                                                                |
+| `skip-submodules`   | No                     | `false`                    | AI Auditor only: skip git submodule loading                                                                |
+| `poll-interval`     | No                     | `60`                       | Seconds between status polls                                                                               |
+| `timeout`           | No                     | `120`                      | Maximum minutes to wait for completion                                                                     |
+| `create-issues`     | No                     | `true`                     | AI Auditor only: create GitHub issues for findings                                                         |
+| `issue-severities`  | No                     | `HIGH,MEDIUM`              | AI Auditor only: severities that create issues                                                             |
+| `comment-on-pr`     | No                     | `true`                     | Post summary comment on the PR                                                                             |
+| `fail-on`           | No                     | -                          | AI Auditor only: fail on selected severities; standalone fails on `issues_found`                           |
+| `labels`            | No                     | `ai-auditor,security`      | AI Auditor only: labels added to created issues                                                            |
+| `contract-path`     | AutoProver/AutoFoundry | -                          | Repository-relative `.sol` contract path                                                                   |
+| `contract-name`     | AutoProver/AutoFoundry | -                          | Solidity contract declaration name                                                                         |
+| `design-doc-path`   | No                     | -                          | Optional repository-relative `.md`, `.markdown`, or `.pdf` design document for AutoProver/AutoFoundry      |
+| `threat-model-path` | No                     | -                          | Optional repository-relative `.md`, `.markdown`, or `.pdf` threat model for AutoProver only                |
 
 ## Outputs
 
-| Output | Description |
-|--------|-------------|
-| `job-id` | Zeus audit job ID |
-| `status` | Final status (`succeeded`, `failed`, `cancelled`) |
-| `highs-count` | Number of HIGH findings |
-| `mediums-count` | Number of MEDIUM findings |
-| `lows-count` | Number of LOW findings |
-| `infos-count` | Number of INFO findings |
-| `issues-created` | Comma-separated list of created issue references |
+| Output                 | Description                                                                       |
+| ---------------------- | --------------------------------------------------------------------------------- |
+| `job-id`               | Zeus audit job ID                                                                 |
+| `status`               | Last known status (`succeeded`, `failed`, `cancelled`, or `cancellation_pending`) |
+| `highs-count`          | AI Auditor HIGH finding count                                                     |
+| `mediums-count`        | AI Auditor MEDIUM finding count                                                   |
+| `lows-count`           | AI Auditor LOW finding count                                                      |
+| `infos-count`          | AI Auditor INFO finding count                                                     |
+| `issues-created`       | AI Auditor comma-separated created issue references                               |
+| `engine`               | Selected engine                                                                   |
+| `run-outcome`          | AutoProver verification or AutoFoundry generated-test outcome                     |
+| `generated-files`      | Comma-separated generated paths committed to the PR                               |
+| `generated-commit-sha` | Commit containing generated files, or empty when no commit was needed             |
 
 ## Issue Deduplication
 
-The action avoids creating duplicate issues:
+AI Auditor avoids creating duplicate issues:
 
-- Each finding creates an issue with a unique title: `[Zeus] HIGH: Finding Title (H-01)`
-- Before creating, it searches for open issues with the same title and `zeus-audit` label
+- Each finding creates an issue with a unique title: `[AI Auditor] HIGH: Finding Title (H-01)`
+- Before creating, it searches for an open issue with the same exact title. Legacy `[Auto Prover]` titles remain recognized so the branding update does not duplicate existing findings.
 - If a duplicate is found, it adds a comment noting the finding recurred in the new PR
 - Closing an issue "dismisses" it — if the same finding appears in a future PR, a new issue is created
 
 ## PR Comment
 
-The action **always** posts a summary comment on the PR — including when no findings are detected, so you can confirm Zeus ran successfully.
+By default, the action posts a summary comment on the PR — including when no findings are detected, so you can confirm Zeus ran successfully. Set `comment-on-pr: "false"` to disable it.
 
 When findings exist, the comment includes:
+
 - Severity breakdown table
 - Links to created/updated issues
 - LOW and INFO findings in a collapsible section
@@ -279,9 +407,17 @@ When no findings are detected, you get a clean "No Findings" confirmation.
 
 Re-running the action updates the existing comment rather than posting a new one.
 
+AutoProver comments show the formal property/rule outcome, rule status counts,
+coverage gaps, and skipped properties. AutoFoundry comments instead show
+generated test counts, test outcomes, test-coverage gaps, and skipped test
+objectives. Both include billed cost, the generated commit, and any
+collision-renamed files. These engines do not create severity-based GitHub
+issues.
+
 ## Credits
 
-Each diff audit consumes **1 Zeus credit**. Credits are refunded if the Zeus backend fails to start the audit. See [zeus.certora.com](https://zeus.certora.com) for pricing.
+The action reports the plan-adjusted billed amount returned by Zeus. See
+[zeus.certora.com](https://zeus.certora.com) for current pricing.
 
 ## License
 
