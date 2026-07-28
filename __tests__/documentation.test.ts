@@ -20,9 +20,14 @@ function manifestKeys(manifest: string, section: "inputs" | "outputs") {
 describe("published usage documentation", () => {
   it("uses the release channel that supports all documented engines", () => {
     const readme = read("README.md");
+    const manifest = read("action.yml");
+    const packageJson = JSON.parse(read("package.json")) as { name: string };
 
-    expect(readme).toContain("Certora/zeus-guardian-ci@main");
-    expect(readme).not.toContain("Certora/zeus-guardian-ci@v1");
+    expect(packageJson.name).toBe("autoprover-guardian-ci");
+    expect(readme).toContain("# AutoProver Guardian CI");
+    expect(manifest).toContain('name: "AutoProver Guardian CI"');
+    expect(readme).toContain("Certora/autoprover-guardian-ci@main");
+    expect(readme).not.toContain("Certora/zeus-guardian-ci@");
     expect(readme).toContain("AI Auditor");
     expect(readme).toContain("AutoProver");
     expect(readme).toContain("AutoFoundry");

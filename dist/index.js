@@ -30426,6 +30426,8 @@ exports.SEVERITY_EMOJI = {
 exports.SEVERITY_LABEL_PREFIX = "ai-auditor:";
 exports.ZEUS_AUDIT_LABEL = "ai-auditor";
 exports.LEGACY_ZEUS_AUDIT_LABEL = "auto-prover";
+// Keep the original marker so runs after the repository rename update existing
+// pull-request comments instead of creating duplicates.
 exports.PR_COMMENT_MARKER = "<!-- zeus-guardian-ci -->";
 exports.DEFAULT_POLL_INTERVAL = 60;
 exports.DEFAULT_TIMEOUT = 120;
@@ -31579,7 +31581,7 @@ async function run() {
             core.setFailed(`Found ${failFindings.length} findings matching fail-on severities: ${config.failOn.join(", ")}`);
         }
     }
-    core.info("Zeus Guardian CI completed successfully.");
+    core.info("AutoProver Guardian CI completed successfully.");
 }
 
 

@@ -34,7 +34,7 @@ describe("ZeusApi", () => {
 
     await api.createFullAudit({
       engine: "ai-auditor",
-      target: "https://github.com/Certora/zeus-guardian-ci",
+      target: "https://github.com/Certora/autoprover-guardian-ci",
       branch: "a".repeat(40),
       context: ["contracts/**/*.sol"],
       use_memory: false,
@@ -66,12 +66,12 @@ describe("ZeusApi", () => {
         auditType === "full"
           ? api.createFullAudit({
               engine: "ai-auditor",
-              target: "https://github.com/Certora/zeus-guardian-ci",
+              target: "https://github.com/Certora/autoprover-guardian-ci",
               branch: "b".repeat(40),
               context: ["contracts/**/*.sol"],
             })
           : api.createDiffAudit({
-              target: "https://github.com/Certora/zeus-guardian-ci",
+              target: "https://github.com/Certora/autoprover-guardian-ci",
               branch_starting: "a".repeat(40),
               branch_ending: "b".repeat(40),
               context: ["contracts/**/*.sol"],
@@ -97,7 +97,7 @@ describe("ZeusApi", () => {
     await expect(
       api.createStandaloneAudit({
         engine: "auto-prover",
-        target: "https://github.com/Certora/zeus-guardian-ci",
+        target: "https://github.com/Certora/autoprover-guardian-ci",
         branch: "b".repeat(40),
         pull_request_number: 42,
         contract_path: "src/Vault.sol",
@@ -121,7 +121,7 @@ describe("ZeusApi", () => {
     await expect(
       api.createStandaloneAudit({
         engine: "auto-foundry",
-        target: "https://github.com/Certora/zeus-guardian-ci",
+        target: "https://github.com/Certora/autoprover-guardian-ci",
         branch: "b".repeat(40),
         pull_request_number: 42,
         contract_path: "src/Vault.sol",
@@ -153,7 +153,7 @@ describe("ZeusApi", () => {
 
       await api.createStandaloneAudit({
         engine,
-        target: "https://github.com/Certora/zeus-guardian-ci",
+        target: "https://github.com/Certora/autoprover-guardian-ci",
         branch: "b".repeat(40),
         pull_request_number: 42,
         contract_path: "src/Vault.sol",
@@ -325,7 +325,7 @@ describe("ZeusApi", () => {
 
     const launch = api.createStandaloneAudit({
       engine: "auto-prover",
-      target: "https://github.com/Certora/zeus-guardian-ci",
+      target: "https://github.com/Certora/autoprover-guardian-ci",
       branch: "b".repeat(40),
       pull_request_number: 42,
       contract_path: "src/Vault.sol",

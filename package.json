@@ -1,5 +1,5 @@
 {
-  "name": "zeus-guardian-ci",
+  "name": "autoprover-guardian-ci",
   "version": "1.0.0",
   "description": "GitHub Action for AI Auditor, AutoProver, and AutoFoundry pull-request workflows",
   "main": "dist/index.js",

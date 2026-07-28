@@ -9,14 +9,14 @@ const { getInputMock, githubContextMock, inputs } = vi.hoisted(() => ({
           ref: "main",
           sha: "a".repeat(40),
           repo: {
-            full_name: "Certora/zeus-guardian-ci",
+            full_name: "Certora/autoprover-guardian-ci",
           },
         },
         head: {
           ref: "feature/vault",
           sha: "b".repeat(40),
           repo: {
-            full_name: "Certora/zeus-guardian-ci",
+            full_name: "Certora/autoprover-guardian-ci",
           },
         },
         number: 42,
@@ -24,7 +24,7 @@ const { getInputMock, githubContextMock, inputs } = vi.hoisted(() => ({
     },
     repo: {
       owner: "Certora",
-      repo: "zeus-guardian-ci",
+      repo: "autoprover-guardian-ci",
     },
   },
   inputs: new Map<string, string>(),
@@ -53,7 +53,7 @@ describe("getConfig", () => {
     inputs.clear();
     setRequiredInputs();
     githubContextMock.payload.pull_request.head.repo.full_name =
-      "Certora/zeus-guardian-ci";
+      "Certora/autoprover-guardian-ci";
     getInputMock.mockImplementation(
       (name: string, options?: { required?: boolean }) => {
         const value = inputs.get(name) ?? "";
@@ -244,7 +244,7 @@ describe("getConfig", () => {
     inputs.set("contract-path", "src/Vault.sol");
     inputs.set("contract-name", "Vault");
     githubContextMock.payload.pull_request.head.repo.full_name =
-      "contributor/zeus-guardian-ci";
+      "contributor/autoprover-guardian-ci";
 
     expect(() => getConfig()).toThrow(
       "AutoProver and AutoFoundry require a same-repository pull request",

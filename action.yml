@@ -1,4 +1,4 @@
-name: "Zeus Guardian CI"
+name: "AutoProver Guardian CI"
 description: "Run AI Auditor, AutoProver, or AutoFoundry on pull requests"
 author: "Certora"
 

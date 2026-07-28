@@ -1,4 +1,4 @@
-# Zeus Guardian CI
+# AutoProver Guardian CI
 
 A GitHub Action that runs [Zeus](https://zeus.certora.com) AI Auditor,
 AutoProver, or AutoFoundry on pull requests.
@@ -60,7 +60,7 @@ jobs:
   zeus-audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: Certora/zeus-guardian-ci@main
+      - uses: Certora/autoprover-guardian-ci@main
         with:
           api-key: ${{ secrets.AUTOPROVER_API_KEY }}
           context: "contracts/**/*.sol"
@@ -76,7 +76,7 @@ same-repository pull requests whose head still matches the audited commit.
 
 ## One-Click Install from Dashboard
 
-Prefer a visual setup? You can install Zeus Guardian CI directly from the Zeus dashboard — no manual file creation needed.
+Prefer a visual setup? You can install AutoProver Guardian CI directly from the Zeus dashboard — no manual file creation needed.
 
 1. Go to your organization on [zeus.certora.com](https://zeus.certora.com)
 2. Click **GitHub Action** in the sidebar
@@ -112,7 +112,7 @@ The PAT is revalidated for generated-file follow-ups but is never used as the
 server-side generated-commit write credential.
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@main
+- uses: Certora/autoprover-guardian-ci@main
   with:
     api-key: ${{ secrets.AUTOPROVER_API_KEY }}
     context: "contracts/**/*.sol"
@@ -137,7 +137,7 @@ By default, the action runs a diff audit between the PR base and head. Set
 `audit-type: "full"` to analyze the configured `context` at the PR head commit:
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@main
+- uses: Certora/autoprover-guardian-ci@main
   with:
     api-key: ${{ secrets.AUTOPROVER_API_KEY }}
     context: "contracts/**/*.sol"
@@ -149,7 +149,7 @@ assumptions from previous audits are sent as context so Zeus does not re-report
 them. Disable it with `use-memory: "false"`:
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@main
+- uses: Certora/autoprover-guardian-ci@main
   with:
     api-key: ${{ secrets.AUTOPROVER_API_KEY }}
     context: "contracts/**/*.sol"
@@ -160,7 +160,7 @@ them. Disable it with `use-memory: "false"`:
 You can optionally narrow the focus with `scope`:
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@main
+- uses: Certora/autoprover-guardian-ci@main
   with:
     api-key: ${{ secrets.AUTOPROVER_API_KEY }}
     context: "contracts/**/*.sol"
@@ -179,7 +179,7 @@ permissions:
   contents: read
 
 steps:
-  - uses: Certora/zeus-guardian-ci@main
+  - uses: Certora/autoprover-guardian-ci@main
     with:
       api-key: ${{ secrets.AUTOPROVER_API_KEY }}
       engine: "auto-prover"
@@ -197,7 +197,7 @@ permissions:
   contents: read
 
 steps:
-  - uses: Certora/zeus-guardian-ci@main
+  - uses: Certora/autoprover-guardian-ci@main
     with:
       api-key: ${{ secrets.AUTOPROVER_API_KEY }}
       engine: "auto-foundry"
@@ -265,7 +265,7 @@ continues to result handling instead of being reported as a timeout.
 ### Fail on HIGH Severity Findings
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@main
+- uses: Certora/autoprover-guardian-ci@main
   with:
     api-key: ${{ secrets.AUTOPROVER_API_KEY }}
     context: "contracts/**/*.sol"
@@ -278,7 +278,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 
 ```yaml
 # Create issues for everything except INFO
-- uses: Certora/zeus-guardian-ci@main
+- uses: Certora/autoprover-guardian-ci@main
   with:
     api-key: ${{ secrets.AUTOPROVER_API_KEY }}
     context: "src/**/*.sol,lib/**/*.sol"
@@ -288,7 +288,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 
 ```yaml
 # Only create issues for HIGH findings
-- uses: Certora/zeus-guardian-ci@main
+- uses: Certora/autoprover-guardian-ci@main
   with:
     api-key: ${{ secrets.AUTOPROVER_API_KEY }}
     context: "contracts/**/*.sol"
@@ -297,7 +297,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 
 ```yaml
 # Create issues for all severities
-- uses: Certora/zeus-guardian-ci@main
+- uses: Certora/autoprover-guardian-ci@main
   with:
     api-key: ${{ secrets.AUTOPROVER_API_KEY }}
     context: "contracts/**/*.sol"
@@ -307,7 +307,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 ### Maximum DeepDive Iterations
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@main
+- uses: Certora/autoprover-guardian-ci@main
   with:
     api-key: ${{ secrets.AUTOPROVER_API_KEY }}
     context: "contracts/**/*.sol"
@@ -318,7 +318,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 ### Disable Issue Creation (PR Comment Only)
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@main
+- uses: Certora/autoprover-guardian-ci@main
   with:
     api-key: ${{ secrets.AUTOPROVER_API_KEY }}
     context: "contracts/**/*.sol"
@@ -329,7 +329,7 @@ By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-sever
 
 ```yaml
 steps:
-  - uses: Certora/zeus-guardian-ci@main
+  - uses: Certora/autoprover-guardian-ci@main
     id: audit
     with:
       api-key: ${{ secrets.AUTOPROVER_API_KEY }}
@@ -347,7 +347,7 @@ steps:
 If you're using a different Zeus environment (e.g., staging):
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@main
+- uses: Certora/autoprover-guardian-ci@main
   with:
     api-key: ${{ secrets.AUTOPROVER_API_KEY }}
     context: "contracts/**/*.sol"

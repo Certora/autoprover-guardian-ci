@@ -803,5 +803,5 @@ export async function run(): Promise<void> {
     }
   }
 
-  core.info("Zeus Guardian CI completed successfully.");
+  core.info("AutoProver Guardian CI completed successfully.");
 }
