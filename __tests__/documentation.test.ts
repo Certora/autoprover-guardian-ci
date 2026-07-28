@@ -32,7 +32,9 @@ describe("published usage documentation", () => {
     const readme = read("README.md");
     const manifest = read("action.yml");
 
-    expect(readme).toContain("`AI_AUDITOR_API_KEY` secret");
+    expect(readme).toContain("`AUTOPROVER_API_KEY` secret");
+    expect(readme).not.toContain("AI_AUDITOR_API_KEY");
+    expect(readme).not.toContain("ZEUS_API_KEY");
     expect(readme).toContain("`ai-auditor,security`");
     expect(manifest).toContain('default: "ai-auditor,security"');
     expect(readme).toContain("[AI Auditor] HIGH:");
