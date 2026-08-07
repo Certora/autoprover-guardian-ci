@@ -1,12 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { getCommitMock, getOctokitMock, infoMock, searchIssuesMock } =
-  vi.hoisted(() => ({
-    getCommitMock: vi.fn(),
-    getOctokitMock: vi.fn(),
-    infoMock: vi.fn(),
-    searchIssuesMock: vi.fn(),
-  }));
+const {
+  createCommentMock,
+  getCommitMock,
+  getOctokitMock,
+  infoMock,
+  listCommentsMock,
+  paginateMock,
+  searchIssuesMock,
+  updateCommentMock,
+} = vi.hoisted(() => ({
+  createCommentMock: vi.fn(),
+  getCommitMock: vi.fn(),
+  getOctokitMock: vi.fn(),
+  infoMock: vi.fn(),
+  listCommentsMock: vi.fn(),
+  paginateMock: vi.fn(),
+  searchIssuesMock: vi.fn(),
+  updateCommentMock: vi.fn(),
+}));
 
 vi.mock("@actions/core", () => ({
   info: infoMock,
@@ -26,12 +38,13 @@ vi.mock("@actions/github", () => ({
 import { GitHubClient } from "../src/github";
 
 const HEAD_SHA = "b".repeat(40);
-const JOB_ID = "11111111-1111-4111-8111-111111111111";
+const RUN_ID = "11111111-1111-4111-8111-111111111111";
 
 describe("GitHubClient", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getOctokitMock.mockReturnValue({
+      paginate: paginateMock,
       rest: {
         repos: {
           getCommit: getCommitMock,
@@ -39,8 +52,14 @@ describe("GitHubClient", () => {
         search: {
           issuesAndPullRequests: searchIssuesMock,
         },
+        issues: {
+          listComments: listCommentsMock,
+          updateComment: updateCommentMock,
+          createComment: createCommentMock,
+        },
       },
     });
+    paginateMock.mockResolvedValue([]);
   });
 
   it.each([
@@ -69,38 +88,94 @@ describe("GitHubClient", () => {
     });
   });
 
-  it("returns the UUID from an exact final commit-message trailer", async () => {
-    getCommitMock.mockResolvedValue({
-      data: {
-        sha: HEAD_SHA,
-        commit: {
-          message: `Add AutoProver artifacts for Vault\r\n\r\nZeus-Guardian-Job: ${JOB_ID}\r\n`,
+  it.each([
+    ["current", `Certora-Guardian-Run: ${RUN_ID}`],
+    ["legacy", `Zeus-Guardian-Job: ${RUN_ID}`],
+  ])(
+    "returns the UUID from an exact final %s commit-message trailer",
+    async (_kind, trailer) => {
+      getCommitMock.mockResolvedValue({
+        data: {
+          sha: HEAD_SHA,
+          commit: {
+            message: `Add AutoProver artifacts for Vault\r\n\r\n${trailer}\r\n`,
+          },
+          parents: [{ sha: "a".repeat(40) }],
         },
-      },
-    });
+      });
+      const client = new GitHubClient("github-token");
+
+      await expect(client.getGeneratedFollowup(HEAD_SHA)).resolves.toEqual({
+        runId: RUN_ID,
+        sourceCommitSha: "a".repeat(40),
+      });
+
+      expect(getOctokitMock).toHaveBeenCalledWith("github-token");
+      expect(getCommitMock).toHaveBeenCalledWith({
+        owner: "Certora",
+        repo: "contracts",
+        ref: HEAD_SHA,
+      });
+      expect(infoMock).toHaveBeenCalledWith(
+        `Detected generated-commit follow-up marker for Certora run ${RUN_ID}.`,
+      );
+    },
+  );
+
+  it("paginates PR comments before updating the existing Guardian comment", async () => {
+    paginateMock.mockResolvedValue([
+      { id: 101, body: "unrelated" },
+      { id: 202, body: "<!-- zeus-guardian-ci -->\nold result" },
+    ]);
     const client = new GitHubClient("github-token");
 
-    await expect(client.getGeneratedFollowupJobId(HEAD_SHA)).resolves.toBe(
-      JOB_ID,
-    );
+    await client.upsertPrComment(42, "<!-- zeus-guardian-ci -->\nnew result");
 
-    expect(getOctokitMock).toHaveBeenCalledWith("github-token");
-    expect(getCommitMock).toHaveBeenCalledWith({
+    expect(paginateMock).toHaveBeenCalledWith(listCommentsMock, {
       owner: "Certora",
       repo: "contracts",
-      ref: HEAD_SHA,
+      issue_number: 42,
+      per_page: 100,
     });
-    expect(infoMock).toHaveBeenCalledWith(
-      `Detected generated-commit follow-up marker for Zeus job ${JOB_ID}.`,
-    );
+    expect(updateCommentMock).toHaveBeenCalledWith({
+      owner: "Certora",
+      repo: "contracts",
+      comment_id: 202,
+      body: "<!-- zeus-guardian-ci -->\nnew result",
+    });
+    expect(createCommentMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps comments for different workflows independent", async () => {
+    paginateMock.mockResolvedValue([
+      {
+        id: 303,
+        body: "<!-- certora-guardian-ci:auto-prover -->\nformal result",
+      },
+    ]);
+    const client = new GitHubClient("github-token");
+    const marker = "<!-- certora-guardian-ci:ai-auditor-diff -->";
+
+    await client.upsertPrComment(42, `${marker}\ndiff result`, marker);
+
+    expect(updateCommentMock).not.toHaveBeenCalled();
+    expect(createCommentMock).toHaveBeenCalledWith({
+      owner: "Certora",
+      repo: "contracts",
+      issue_number: 42,
+      body: `${marker}\ndiff result`,
+    });
   });
 
   it.each([
-    `Zeus-Guardian-Job: ${JOB_ID}\nadditional text`,
-    "Zeus-Guardian-Job: job-1",
-    ` Zeus-Guardian-Job: ${JOB_ID}`,
-    `zeus-guardian-job: ${JOB_ID}`,
-    `Zeus-Guardian-Job: ${JOB_ID} `,
+    `Certora-Guardian-Run: ${RUN_ID}\nadditional text`,
+    "Certora-Guardian-Run: run-1",
+    ` Certora-Guardian-Run: ${RUN_ID}`,
+    `certora-guardian-run: ${RUN_ID}`,
+    `Certora-Guardian-Run: ${RUN_ID} `,
+    `Zeus-Guardian-Job: ${RUN_ID}\nadditional text`,
+    `zeus-guardian-job: ${RUN_ID}`,
+    `Zeus-Guardian-Job: ${RUN_ID} `,
   ])(
     "ignores a commit message without the exact final trailer: %s",
     async (message) => {
@@ -108,13 +183,12 @@ describe("GitHubClient", () => {
         data: {
           sha: HEAD_SHA,
           commit: { message },
+          parents: [{ sha: "a".repeat(40) }],
         },
       });
       const client = new GitHubClient("github-token");
 
-      await expect(
-        client.getGeneratedFollowupJobId(HEAD_SHA),
-      ).resolves.toBeNull();
+      await expect(client.getGeneratedFollowup(HEAD_SHA)).resolves.toBeNull();
       expect(infoMock).not.toHaveBeenCalled();
     },
   );
@@ -124,14 +198,15 @@ describe("GitHubClient", () => {
       data: {
         sha: "c".repeat(40),
         commit: {
-          message: `Zeus-Guardian-Job: ${JOB_ID}`,
+          message: `Certora-Guardian-Run: ${RUN_ID}`,
         },
+        parents: [{ sha: "a".repeat(40) }],
       },
     });
     const client = new GitHubClient("github-token");
 
-    await expect(client.getGeneratedFollowupJobId(HEAD_SHA)).rejects.toThrow(
-      "Failed to inspect the pull request head commit. Refusing to launch an audit that could duplicate a generated-commit follow-up.",
+    await expect(client.getGeneratedFollowup(HEAD_SHA)).rejects.toThrow(
+      "Failed to inspect the pull request head commit. Refusing to launch a run that could duplicate a generated-commit follow-up.",
     );
   });
 
@@ -142,7 +217,7 @@ describe("GitHubClient", () => {
     const client = new GitHubClient("github-token");
 
     const error = await client
-      .getGeneratedFollowupJobId(HEAD_SHA)
+      .getGeneratedFollowup(HEAD_SHA)
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(Error);

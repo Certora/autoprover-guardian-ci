@@ -4,6 +4,7 @@ import type { Finding, Severity } from "./types";
 import {
   LEGACY_ZEUS_AUDIT_LABEL,
   PR_COMMENT_MARKER,
+  SHA_REGEX,
   SEVERITY_LABEL_PREFIX,
   ZEUS_AUDIT_LABEL,
 } from "./constants";
@@ -11,12 +12,12 @@ import { formatIssueTitle, formatIssueBody } from "./format";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
-function generatedJobIdFromCommitMessage(message: string): string | null {
+function generatedRunIdFromCommitMessage(message: string): string | null {
   const lines = message.split(/\r?\n/);
   while (lines.at(-1) === "") lines.pop();
   const trailer = lines.at(-1);
   const match = trailer?.match(
-    /^Zeus-Guardian-Job: ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/,
+    /^(?:Certora-Guardian-Run|Zeus-Guardian-Job): ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/,
   );
   return match?.[1] ?? null;
 }
@@ -105,7 +106,7 @@ export class GitHubClient {
 
   async createOrUpdateIssue(
     finding: Finding,
-    jobId: string,
+    runId: string,
     prNumber: number,
     labels: string[],
   ): Promise<string | null> {
@@ -122,7 +123,7 @@ export class GitHubClient {
           owner: this.owner,
           repo: this.repo,
           issue_number: existingIssueNumber,
-          body: `This finding was detected again in PR #${prNumber} (Zeus Job: \`${jobId}\`).`,
+          body: `This finding was detected again in PR #${prNumber} (Certora run: \`${runId}\`).`,
         });
         core.info(
           `Finding ${finding.id} already tracked in #${existingIssueNumber}, added recurrence comment.`,
@@ -135,7 +136,7 @@ export class GitHubClient {
         owner: this.owner,
         repo: this.repo,
         title,
-        body: formatIssueBody(finding, jobId, prNumber),
+        body: formatIssueBody(finding, runId, prNumber),
         labels: allLabels,
       });
 
@@ -149,19 +150,30 @@ export class GitHubClient {
     }
   }
 
-  async upsertPrComment(prNumber: number, body: string): Promise<void> {
+  async upsertPrComment(
+    prNumber: number,
+    body: string,
+    marker = PR_COMMENT_MARKER,
+  ): Promise<void> {
     try {
       // Search for existing comment with our marker
-      const { data: comments } = await this.octokit.rest.issues.listComments({
-        owner: this.owner,
-        repo: this.repo,
-        issue_number: prNumber,
-        per_page: 100,
-      });
-
-      const existing = comments.find((c) =>
-        c.body?.includes(PR_COMMENT_MARKER),
+      const comments = await this.octokit.paginate(
+        this.octokit.rest.issues.listComments,
+        {
+          owner: this.owner,
+          repo: this.repo,
+          issue_number: prNumber,
+          per_page: 100,
+        },
       );
+
+      const existing =
+        comments.find((comment) => comment.body?.includes(marker)) ??
+        (marker === PR_COMMENT_MARKER
+          ? undefined
+          : comments.find((comment) =>
+              comment.body?.includes(PR_COMMENT_MARKER),
+            ));
 
       if (existing) {
         await this.octokit.rest.issues.updateComment({
@@ -187,7 +199,9 @@ export class GitHubClient {
     }
   }
 
-  async getGeneratedFollowupJobId(headSha: string): Promise<string | null> {
+  async getGeneratedFollowup(
+    headSha: string,
+  ): Promise<{ runId: string; sourceCommitSha: string } | null> {
     try {
       const { data: commit } = await this.octokit.rest.repos.getCommit({
         owner: this.owner,
@@ -197,16 +211,25 @@ export class GitHubClient {
       if (commit.sha.toLowerCase() !== headSha.toLowerCase()) {
         throw new Error("GitHub returned a different head commit.");
       }
-      const jobId = generatedJobIdFromCommitMessage(commit.commit.message);
-      if (jobId) {
+      const runId = generatedRunIdFromCommitMessage(commit.commit.message);
+      if (runId) {
+        const sourceCommitSha = commit.parents[0]?.sha;
+        if (
+          commit.parents.length !== 1 ||
+          !sourceCommitSha ||
+          !SHA_REGEX.test(sourceCommitSha)
+        ) {
+          throw new Error("Generated commit does not have one valid parent.");
+        }
         core.info(
-          `Detected generated-commit follow-up marker for Zeus job ${jobId}.`,
+          `Detected generated-commit follow-up marker for Certora run ${runId}.`,
         );
+        return { runId, sourceCommitSha };
       }
-      return jobId;
+      return null;
     } catch {
       throw new Error(
-        "Failed to inspect the pull request head commit. Refusing to launch an audit that could duplicate a generated-commit follow-up.",
+        "Failed to inspect the pull request head commit. Refusing to launch a run that could duplicate a generated-commit follow-up.",
       );
     }
   }

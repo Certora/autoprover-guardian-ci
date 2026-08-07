@@ -3,19 +3,32 @@ import type {
   AissRunOutcome,
   AuditFindings,
   CommitGeneratedFilesResponse,
-  Engine,
   Finding,
+  FindingValidationReport,
+  PublicReport,
   Severity,
 } from "./types";
-import { PR_COMMENT_MARKER, SEVERITY_EMOJI } from "./constants";
+import { prCommentMarker, SEVERITY_EMOJI } from "./constants";
 
 export function formatIssueTitle(finding: Finding): string {
-  return `[AI Auditor] ${finding.severity}: ${finding.title} (${finding.id})`;
+  const prefix = `[AI Auditor] ${finding.severity}: `;
+  const suffix = ` (${finding.id})`;
+  const titleLimit = 240;
+  const available = titleLimit - prefix.length - suffix.length;
+  if (available <= 1) {
+    const raw = `${prefix}${finding.title}${suffix}`;
+    return `${raw.slice(0, Math.floor((titleLimit - 1) / 2))}…${raw.slice(-Math.ceil((titleLimit - 1) / 2))}`;
+  }
+  const title =
+    finding.title.length > available
+      ? `${finding.title.slice(0, available - 1)}…`
+      : finding.title;
+  return `${prefix}${title}${suffix}`;
 }
 
 export function formatIssueBody(
   finding: Finding,
-  jobId: string,
+  runId: string,
   prNumber: number,
 ): string {
   const locations =
@@ -23,12 +36,13 @@ export function formatIssueBody(
       ? finding.locations.map((l) => `\`${l}\``).join(", ")
       : "_No specific location_";
 
-  return `## ${finding.severity} ${finding.id}: ${finding.title}
+  return truncateReport(
+    `## ${finding.severity} ${finding.id}: ${finding.title}
 
 **Severity:** ${finding.severity}
 **Locations:** ${locations}
 **Detected in:** PR #${prNumber}
-**AI Auditor Job:** \`${jobId}\`
+**AI Auditor Run:** \`${runId}\`
 
 ### Description
 
@@ -39,16 +53,20 @@ ${finding.description}
 ${finding.recommendation}
 
 ---
-_This issue was automatically created by [AI Auditor](https://zeus.certora.com). To dismiss, close this issue._`;
+_This issue was automatically created by [AI Auditor](https://app.certora.com). To dismiss, close this issue._`,
+    60_000,
+  );
 }
 
 export function formatPrComment(
   findings: AuditFindings,
-  jobId: string,
-  cost: number,
+  runId: string,
+  cost: number | null,
   issueLinks: { finding: Finding; url: string }[],
   prNumber: number,
+  workflow: "ai-auditor-full" | "ai-auditor-diff",
 ): string {
+  const displayedCost = cost === null ? "unavailable" : `$${cost.toFixed(2)}`;
   const counts = {
     HIGH: findings.highs.length,
     MEDIUM: findings.mediums.length,
@@ -61,15 +79,15 @@ export function formatPrComment(
   let body: string;
 
   if (totalFindings === 0) {
-    body = `${PR_COMMENT_MARKER}
+    body = `${prCommentMarker(workflow)}
 ## \u2705 AI Auditor Results — No Findings
 
 No security issues were detected in this PR.
 
-**Job:** \`${jobId}\` | **Cost:** $${cost.toFixed(2)}
+**Run:** \`${runId}\` | **Cost:** ${displayedCost}
 `;
   } else {
-    body = `${PR_COMMENT_MARKER}
+    body = `${prCommentMarker(workflow)}
 ## ${SEVERITY_EMOJI.HIGH} AI Auditor Results
 
 | Severity | Count |
@@ -80,7 +98,7 @@ No security issues were detected in this PR.
 | ${SEVERITY_EMOJI.INFO} INFO | ${counts.INFO} |
 | **Total** | **${totalFindings}** |
 
-**Job:** \`${jobId}\` | **Cost:** $${cost.toFixed(2)}
+**Run:** \`${runId}\` | **Cost:** ${displayedCost}
 `;
   }
 
@@ -106,42 +124,111 @@ No security issues were detected in this PR.
     body += `</details>\n`;
   }
 
-  body += `\n---\n_Powered by [AI Auditor](https://zeus.certora.com)_\n`;
+  body += `\n---\n_Powered by [AI Auditor](https://app.certora.com)_\n`;
 
-  return body;
+  return truncateReport(body, 60_000);
 }
 
-export function formatLegacyPrComment(
-  markdownResult: string,
-  jobId: string,
-  prNumber: number,
-): string {
-  return `${PR_COMMENT_MARKER}
-## ${SEVERITY_EMOJI.HIGH} AI Auditor Results
+function truncateReport(value: string, limit = 45_000): string {
+  if (Buffer.byteLength(value, "utf8") <= limit) return value;
+  const suffix = "\n\n_Output truncated._";
+  const contentLimit = limit - Buffer.byteLength(suffix, "utf8");
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const midpoint = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(0, midpoint), "utf8") <= contentLimit) {
+      low = midpoint;
+    } else {
+      high = midpoint - 1;
+    }
+  }
+  return `${value.slice(0, low)}${suffix}`;
+}
 
-**Job:** \`${jobId}\` | **PR:** #${prNumber}
+export function formatAiAuditorMarkdownPrComment(args: {
+  workflow: "ai-auditor-full" | "ai-auditor-diff";
+  runId: string;
+  cost: number | null;
+  content: string;
+}): string {
+  const displayedCost =
+    args.cost === null ? "unavailable" : `$${args.cost.toFixed(2)}`;
+  const content = truncateReport(args.content, 50_000);
+  return truncateReport(
+    `${prCommentMarker(args.workflow)}
+## AI Auditor Results
 
-> **Note:** This audit returned a legacy markdown report. Structured findings are not available.
+${content}
 
-<details>
-<summary>Full Report</summary>
-
-${markdownResult}
-
-</details>
+**Run:** \`${args.runId}\` | **Cost:** ${displayedCost}
 
 ---
-_Powered by [AI Auditor](https://zeus.certora.com)_
-`;
+_Powered by [AI Auditor](https://app.certora.com)_
+`,
+    60_000,
+  );
 }
 
-function engineDisplayName(engine: Exclude<Engine, "ai-auditor">): string {
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+export function formatFindingValidationPrComment(args: {
+  runId: string;
+  cost: number | null;
+  report: PublicReport;
+  parsed: FindingValidationReport | null;
+}): string {
+  const displayedCost =
+    args.cost === null ? "unavailable" : `$${args.cost.toFixed(2)}`;
+  let body = `${prCommentMarker("ai-auditor-finding-validation")}\n## AI Auditor Finding Validation\n\n`;
+
+  if (args.parsed) {
+    const verdict =
+      args.parsed.final_verdict === "VALID"
+        ? "Valid finding"
+        : "Likely false positive";
+    body += `**Verdict:** ${verdict}\n`;
+    body += `**Severity:** ${args.parsed.final_severity ?? "Not assigned"}\n`;
+    body += `**Consensus:** ${args.parsed.consensus_method}\n`;
+    body += `**Analysis status:** ${args.parsed.analysis_status}\n`;
+    if (args.parsed.severity_reasoning) {
+      body += `\n### Severity reasoning\n\n${args.parsed.severity_reasoning}\n`;
+    }
+    if (args.parsed.impact) {
+      body += `\n### Impact\n\n${args.parsed.impact}\n`;
+    }
+    if (args.parsed.likelihood) {
+      body += `\n### Likelihood\n\n${args.parsed.likelihood}\n`;
+    }
+    if (args.parsed.false_positive_reasoning) {
+      body += `\n### False-positive reasoning\n\n${args.parsed.false_positive_reasoning}\n`;
+    }
+  } else if (args.report.format === "markdown") {
+    body += `${truncateReport(args.report.content)}\n`;
+  } else {
+    const json = truncateReport(
+      JSON.stringify(args.report.content, null, 2) ?? "null",
+    );
+    body += `<details>\n<summary>Unrecognized validation result</summary>\n\n<pre>${escapeHtml(json)}</pre>\n</details>\n`;
+  }
+
+  body += `\n**Run:** \`${args.runId}\` | **Cost:** ${displayedCost}\n`;
+  body += `\n---\n_Powered by [AI Auditor](https://app.certora.com)_\n`;
+  return truncateReport(body, 60_000);
+}
+
+function engineDisplayName(engine: "auto-prover" | "auto-foundry"): string {
   return engine === "auto-prover" ? "AutoProver" : "AutoFoundry";
 }
 
 function outcomeLabel(
   outcome: AissRunOutcome,
-  engine: Exclude<Engine, "ai-auditor">,
+  engine: "auto-prover" | "auto-foundry",
 ): string {
   if (engine === "auto-foundry") {
     if (outcome === "verified") return "Tests passed";
@@ -173,23 +260,11 @@ export function isFailingStandaloneOutcome(outcome: AissRunOutcome): boolean {
 }
 
 export function getStandaloneWarnings(
-  reportState: string,
-  report: AissRunReport | null,
-  engine: Exclude<Engine, "ai-auditor"> = "auto-prover",
+  report: AissRunReport,
+  engine: "auto-prover" | "auto-foundry" = "auto-prover",
 ): string[] {
   const isFoundry = engine === "auto-foundry";
   const warnings: string[] = [];
-  if (reportState !== "ready") {
-    warnings.push(`The structured report state is ${reportState}.`);
-  }
-  if (!report) {
-    warnings.push(
-      isFoundry
-        ? "No structured Foundry test report was available."
-        : "No structured property report was available.",
-    );
-    return warnings;
-  }
 
   if (report.outcome === "partial") {
     warnings.push(
@@ -207,7 +282,10 @@ export function getStandaloneWarnings(
     warnings.push("The run outcome could not be determined.");
   }
 
-  const skipped = Math.max(report.skipped.length, report.coverage.skippedCount);
+  const skipped = Math.max(
+    report.skipped.length,
+    report.coverage.skipped_count,
+  );
   if (skipped > 0) {
     warnings.push(
       isFoundry
@@ -215,25 +293,25 @@ export function getStandaloneWarnings(
         : `${skipped} ${skipped === 1 ? "property was" : "properties were"} skipped.`,
     );
   }
-  if (!report.coverage.propertyCoverageComplete) {
+  if (!report.coverage.property_coverage_complete) {
     warnings.push(
       isFoundry
         ? "Foundry test coverage is incomplete."
         : "Property coverage is incomplete.",
     );
   }
-  if (report.coverage.gaveUpComponentCount > 0) {
+  if (report.coverage.gave_up_component_count > 0) {
     warnings.push(
       isFoundry
-        ? `${report.coverage.gaveUpComponentCount} component test-generation ${report.coverage.gaveUpComponentCount === 1 ? "attempt was" : "attempts were"} abandoned.`
-        : `${report.coverage.gaveUpComponentCount} component verification ${report.coverage.gaveUpComponentCount === 1 ? "attempt was" : "attempts were"} abandoned.`,
+        ? `${report.coverage.gave_up_component_count} component test-generation ${report.coverage.gave_up_component_count === 1 ? "attempt was" : "attempts were"} abandoned.`
+        : `${report.coverage.gave_up_component_count} component verification ${report.coverage.gave_up_component_count === 1 ? "attempt was" : "attempts were"} abandoned.`,
     );
   }
-  if (report.coverage.droppedOrphanRules > 0) {
+  if (report.coverage.dropped_orphan_rules > 0) {
     warnings.push(
       isFoundry
-        ? `${report.coverage.droppedOrphanRules} generated ${report.coverage.droppedOrphanRules === 1 ? "test was" : "tests were"} omitted from coverage.`
-        : `${report.coverage.droppedOrphanRules} orphan ${report.coverage.droppedOrphanRules === 1 ? "rule was" : "rules were"} omitted from coverage.`,
+        ? `${report.coverage.dropped_orphan_rules} generated ${report.coverage.dropped_orphan_rules === 1 ? "test was" : "tests were"} omitted from coverage.`
+        : `${report.coverage.dropped_orphan_rules} orphan ${report.coverage.dropped_orphan_rules === 1 ? "rule was" : "rules were"} omitted from coverage.`,
     );
   }
   warnings.push(
@@ -253,50 +331,45 @@ export function getStandaloneWarnings(
 }
 
 export function formatStandalonePrComment(args: {
-  engine: Exclude<Engine, "ai-auditor">;
-  jobId: string;
-  cost: number;
-  reportState: string;
-  report: AissRunReport | null;
+  workflow: "auto-prover" | "auto-foundry";
+  runId: string;
+  cost: number | null;
+  report: AissRunReport;
   commit: CommitGeneratedFilesResponse;
 }): string {
-  const name = engineDisplayName(args.engine);
-  const outcome = args.report?.outcome ?? "unknown";
-  const warnings = getStandaloneWarnings(
-    args.reportState,
-    args.report,
-    args.engine,
-  );
-  const generatedPaths = args.commit.files.map((file) => file.path);
-  const commitCreated = args.commit.commit_created !== false;
-  const isFoundry = args.engine === "auto-foundry";
-  const outcomeText = outcomeLabel(outcome, args.engine);
+  const name = engineDisplayName(args.workflow);
+  const outcome = args.report.outcome;
+  const warnings = getStandaloneWarnings(args.report, args.workflow);
+  const generatedPaths = args.commit.delivery.files.map((file) => file.path);
+  const commitCreated = args.commit.delivery.status === "committed";
+  const isFoundry = args.workflow === "auto-foundry";
+  const outcomeText = outcomeLabel(outcome, args.workflow);
   const firstCountLabel = isFoundry ? "Test objectives" : "Properties";
   const secondCountLabel = isFoundry ? "Generated tests" : "Rules";
   const coverageLabel = isFoundry ? "Test coverage" : "Coverage";
-  const countOrUnavailable = (count: number | undefined) =>
-    args.report ? (count ?? 0) : "Unavailable";
+  const displayedCost =
+    args.cost === null ? "unavailable" : `$${args.cost.toFixed(2)}`;
+  const countOrUnavailable = (count: number | undefined) => count ?? 0;
 
-  let body = `${PR_COMMENT_MARKER}
+  let body = `${prCommentMarker(args.workflow)}
 ## ${name} Results — ${outcomeText}
 
 | Result | Value |
 |--------|-------|
 | Outcome | **${outcomeText}** |
-| Contract | ${args.report ? `\`${args.report.contractName}\`` : "Unavailable"} |
-| Report | ${args.reportState} |
-| ${firstCountLabel} | ${countOrUnavailable(args.report?.coverage.totalProperties)} |
-| ${secondCountLabel} | ${countOrUnavailable(args.report?.coverage.totalRules)} |
-| ${coverageLabel} | ${args.report ? (args.report.coverage.propertyCoverageComplete ? "Complete" : "Has gaps") : "Unavailable"} |
+| Contract | \`${args.report.contract_name}\` |
+| ${firstCountLabel} | ${countOrUnavailable(args.report.coverage.total_properties)} |
+| ${secondCountLabel} | ${countOrUnavailable(args.report.coverage.total_rules)} |
+| ${coverageLabel} | ${args.report.coverage.property_coverage_complete ? "Complete" : "Has gaps"} |
 | Generated files | ${generatedPaths.length} |
 | Generated commit | ${commitCreated ? "Created" : "Not needed (head unchanged)"} |
 
-**Job:** \`${args.jobId}\` | **Cost:** $${args.cost.toFixed(2)} | **Generated commit:** ${commitCreated ? `\`${args.commit.commit_sha}\`` : "None"}
+**Run:** \`${args.runId}\` | **Cost:** ${displayedCost} | **Generated commit:** ${commitCreated ? `\`${args.commit.delivery.commit_sha}\`` : "None"}
 `;
 
-  if (args.report && args.report.ruleCounts.length > 0) {
+  if (args.report.rule_counts.length > 0) {
     body += `\n### ${isFoundry ? "Test results" : "Rule results"}\n\n| Status | Count |\n|--------|-------|\n`;
-    for (const count of args.report.ruleCounts) {
+    for (const count of args.report.rule_counts) {
       body += `| ${isFoundry ? autoFoundryStatusLabel(count.status) : count.status} | ${count.count} |\n`;
     }
   }
@@ -315,13 +388,13 @@ export function formatStandalonePrComment(args: {
     }
   }
 
-  if (args.commit.renamed_files.length > 0) {
+  if (args.commit.delivery.renamed_files.length > 0) {
     body += "\n### Preserved path collisions\n\n";
-    for (const renamed of args.commit.renamed_files) {
+    for (const renamed of args.commit.delivery.renamed_files) {
       body += `- \`${renamed.from}\` → \`${renamed.to}\`\n`;
     }
   }
 
-  body += `\n---\n_Powered by [${name}](https://zeus.certora.com)_\n`;
-  return body;
+  body += `\n---\n_Powered by [${name}](https://app.certora.com)_\n`;
+  return truncateReport(body, 60_000);
 }

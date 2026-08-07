@@ -1,28 +1,37 @@
 import * as core from "@actions/core";
+import { createIdempotencyKey, ZeusApi } from "./api";
 import { getConfig } from "./config";
-import { ZeusApi, ZeusApiDeadlineError, ZeusApiError } from "./api";
-import { GitHubClient } from "./github";
 import {
+  formatAiAuditorMarkdownPrComment,
+  formatFindingValidationPrComment,
   formatPrComment,
-  formatLegacyPrComment,
   formatStandalonePrComment,
   getStandaloneWarnings,
   isFailingStandaloneOutcome,
 } from "./format";
+import { GitHubClient } from "./github";
 import type {
-  AissResult,
-  AissRunOutcome,
-  AiAuditorResult,
-  AuditResultResponse,
+  ActionConfig,
+  AiAuditorActionConfig,
+  AissRunReport,
   AuditFindings,
-  CancelAuditResponse,
   Finding,
+  FindingValidationActionConfig,
+  FindingValidationModelVerdict,
+  FindingValidationReport,
+  PublicReport,
+  Run,
+  RunRequest,
+  RunResult,
   Severity,
   StandaloneActionConfig,
 } from "./types";
+import { workflowEngine, workflowRunType } from "./types";
 import {
-  API_REQUEST_TIMEOUT_MS,
+  CANCELLATION_REQUEST_TIMEOUT_MS,
   MAX_CONSECUTIVE_POLL_FAILURES,
+  prCommentMarker,
+  SHUTDOWN_CANCEL_TIMEOUT_MS,
 } from "./constants";
 
 function sleep(ms: number): Promise<void> {
@@ -42,100 +51,26 @@ function getFindingsBySeverities(
   findings: AuditFindings,
   severities: Severity[],
 ): Finding[] {
-  const set = new Set(severities);
-  const result: Finding[] = [];
-  if (set.has("HIGH")) result.push(...findings.highs);
-  if (set.has("MEDIUM")) result.push(...findings.mediums);
-  if (set.has("LOW")) result.push(...findings.lows);
-  if (set.has("INFO")) result.push(...findings.infos);
-  return result;
-}
-
-function firstFiniteNumber(...values: (number | undefined)[]): number | null {
-  for (const value of values) {
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return value;
-    }
-  }
-  return null;
-}
-
-function formatUsd(value: number | null): string {
-  return value === null ? "unavailable" : `$${value.toFixed(2)}`;
-}
-
-function isAissResult(value: unknown): value is AissResult {
-  if (!value || typeof value !== "object") return false;
-  const result = value as Partial<AissResult>;
-  return (
-    typeof result.report_state === "string" &&
-    Array.isArray(result.artifacts) &&
-    (result.report === null || typeof result.report === "object")
+  const selected = new Set(severities);
+  return getAllFindings(findings).filter((finding) =>
+    selected.has(finding.severity),
   );
 }
 
-function isAiAuditorResult(value: unknown): value is AiAuditorResult {
-  if (!value || typeof value !== "object") return false;
-  const findings = (value as Partial<AiAuditorResult>).findings;
-  return Boolean(
-    findings &&
-    Array.isArray(findings.highs) &&
-    Array.isArray(findings.mediums) &&
-    Array.isArray(findings.lows) &&
-    Array.isArray(findings.infos),
-  );
-}
-
-function isExpectedStandaloneResult(
-  result: AuditResultResponse,
-  jobId: string,
-  config: StandaloneActionConfig,
-  requireContractIdentity = false,
-): result is AuditResultResponse & { result: AissResult } {
-  const hasContractIdentity =
-    result.contract_path !== undefined || result.contract_name !== undefined;
-  const matchesContractIdentity =
-    result.contract_path === config.contractPath &&
-    result.contract_name === config.contractName;
-
-  return (
-    result.job_id === jobId &&
-    result.engine === config.engine &&
-    result.status === "succeeded" &&
-    isAissResult(result.result) &&
-    (matchesContractIdentity ||
-      (!requireContractIdentity && !hasContractIdentity))
-  );
-}
-
-const VALID_AISS_OUTCOMES = new Set<AissRunOutcome>([
-  "verified",
-  "verified_with_gaps",
-  "partial",
-  "issues_found",
-  "unknown",
-]);
-
-function readAissOutcome(result: AissResult): AissRunOutcome {
-  if (!result.report) return "unknown";
-  const outcome = result.report.outcome;
-  if (!VALID_AISS_OUTCOMES.has(outcome)) {
-    throw new Error(`Unexpected standalone audit outcome: ${String(outcome)}`);
-  }
-  return outcome;
-}
-
-function standaloneFailureMessage(
-  engine: StandaloneActionConfig["engine"],
-): string {
-  return engine === "auto-foundry"
-    ? "auto-foundry found one or more failing generated tests."
-    : "auto-prover found one or more violated properties or rules.";
+function parseUsd(value: string | null | undefined): number | null {
+  const parsed = Number(value);
+  return value !== null && value !== undefined && Number.isFinite(parsed)
+    ? parsed
+    : null;
 }
 
 function initializeOutputs(): void {
-  core.setOutput("engine", "");
+  core.setOutput("run-id", "");
+  core.setOutput("workflow", "");
+  core.setOutput("status", "");
   core.setOutput("run-outcome", "");
+  core.setOutput("validation-verdict", "");
+  core.setOutput("validation-severity", "");
   core.setOutput("generated-files", "");
   core.setOutput("generated-commit-sha", "");
   core.setOutput("issues-created", "");
@@ -145,663 +80,927 @@ function initializeOutputs(): void {
   core.setOutput("infos-count", "0");
 }
 
-async function waitForPersistedResult(
-  api: ZeusApi,
-  jobId: string,
-  deadlineMs: number,
-  timeoutLabel: string,
-  pollIntervalMs: number,
-  finalStatus: string,
-): Promise<AuditResultResponse | null> {
-  let waitingForResult = false;
-
-  while (true) {
-    if (waitingForResult && Date.now() >= deadlineMs) {
-      core.warning(
-        `Timeout exceeded (${timeoutLabel}) while waiting for the persisted audit result. The terminal provider workflow will not be cancelled.`,
-      );
-      core.setFailed(
-        `Audit reached provider status ${finalStatus}, but its persisted result did not become available within ${timeoutLabel}.`,
-      );
-      return null;
-    }
-
-    try {
-      return await api.getResult(jobId, deadlineMs);
-    } catch (error) {
-      const retryableResultError =
-        error instanceof ZeusApiDeadlineError ||
-        (error instanceof ZeusApiError &&
-          (error.code === "result_not_ready" ||
-            error.statusCode === 429 ||
-            error.statusCode >= 500));
-      if (!retryableResultError) {
-        throw error;
-      }
-
-      waitingForResult = true;
-      const remainingMs = deadlineMs - Date.now();
-      if (remainingMs <= 0) {
-        continue;
-      }
-
-      const detail =
-        error instanceof ZeusApiError && error.code !== "result_not_ready"
-          ? ` (${error.code})`
-          : "";
-      core.info(
-        `Provider work is complete; waiting for the persisted audit result${detail}...`,
-      );
-      await sleep(Math.min(pollIntervalMs, remainingMs));
-    }
-  }
+function sourceAuthentication(config: ActionConfig) {
+  return config.repositoryPrivate
+    ? ({ type: "organization_github_app" } as const)
+    : ({ type: "public" } as const);
 }
 
-async function statusAfterCancellationAttempt(
-  api: ZeusApi,
-  jobId: string,
-): Promise<Awaited<ReturnType<ZeusApi["getStatus"]>> | null> {
-  try {
-    return await api.getStatus(jobId, Date.now() + API_REQUEST_TIMEOUT_MS);
-  } catch (error) {
-    core.warning(
-      `Could not verify status after cancellation: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return null;
-  }
-}
-
-async function runGeneratedFollowup(
-  config: StandaloneActionConfig,
-  api: ZeusApi,
-  ghClient: GitHubClient,
-  jobId: string,
-): Promise<void> {
-  core.info(`Verifying generated-commit follow-up for Zeus job ${jobId}...`);
-  const result = await api.getResult(jobId);
-  if (!isExpectedStandaloneResult(result, jobId, config, true)) {
-    throw new Error(
-      "Generated follow-up received an unexpected persisted audit result.",
-    );
-  }
-
-  const generatedCommit = await api.commitGeneratedFiles(jobId, {
-    pull_request_number: config.prNumber,
-    token: config.githubToken,
-  });
-  if (!generatedCommit.commit_created) {
-    throw new Error(
-      "Generated follow-up did not resolve to a generated commit.",
-    );
-  }
-  if (
-    generatedCommit.commit_sha.toLowerCase() !==
-    config.branchEnding.toLowerCase()
-  ) {
-    throw new Error(
-      `Generated follow-up commit mismatch: expected ${config.branchEnding}, received ${generatedCommit.commit_sha}.`,
-    );
-  }
-
-  const outcome = readAissOutcome(result.result);
-  const generatedPaths = generatedCommit.files.map((file) => file.path);
-  core.setOutput("engine", result.engine);
-  core.setOutput("job-id", jobId);
-  core.setOutput("status", result.status);
-  core.setOutput("run-outcome", outcome);
-  core.setOutput("generated-files", generatedPaths.join(","));
-  core.setOutput("generated-commit-sha", generatedCommit.commit_sha);
-
-  for (const warning of getStandaloneWarnings(
-    result.result.report_state,
-    result.result.report,
-    config.engine,
-  )) {
-    core.warning(warning);
-  }
-
-  if (config.commentOnPr) {
-    const billedCostUsd =
-      firstFiniteNumber(result.billed_amount_usd, result.actual_cost_usd) ?? 0;
-    const comment = formatStandalonePrComment({
-      engine: config.engine,
-      jobId,
-      cost: billedCostUsd,
-      reportState: result.result.report_state,
-      report: result.result.report,
-      commit: generatedCommit,
-    });
-    await ghClient.upsertPrComment(config.prNumber, comment);
-  }
-
-  if (isFailingStandaloneOutcome(outcome)) {
-    core.setFailed(standaloneFailureMessage(config.engine));
-    return;
-  }
-
-  core.info(
-    `Confirmed ${result.engine} outcome ${outcome} for generated commit ${generatedCommit.commit_sha}.`,
+function isStandaloneConfig(
+  config: ActionConfig,
+): config is StandaloneActionConfig {
+  return (
+    config.workflow === "auto-prover" || config.workflow === "auto-foundry"
   );
 }
 
-// Track active audit for cancellation on SIGTERM/SIGINT
-let activeAudit: { api: ZeusApi; jobId: string } | null = null;
-let shutdownHandlersRegistered = false;
-
-function cancellationSummary(response: CancelAuditResponse): string {
-  if (response.status === "cancelled") {
-    return `Cancellation confirmed: ${response.message}`;
-  }
-  if (response.status === "cancellation_pending") {
-    return `Cancellation requested and still pending: ${response.message}`;
-  }
-  return `Audit reached a failed state: ${response.message}`;
+function isFindingValidationConfig(
+  config: ActionConfig,
+): config is FindingValidationActionConfig {
+  return config.workflow === "ai-auditor-finding-validation";
 }
+
+function clientReference(
+  config: ActionConfig,
+  sourceCommitSha = config.headCommitSha,
+): string {
+  return [
+    "certora-guardian",
+    `pr-${config.prNumber}`,
+    sourceCommitSha,
+    config.workflow,
+  ].join(":");
+}
+
+export function buildRunRequest(config: ActionConfig): RunRequest {
+  const authentication = sourceAuthentication(config);
+  const reference = clientReference(config);
+
+  if (config.workflow === "ai-auditor-diff") {
+    return {
+      source: {
+        repository_url: config.repositoryUrl,
+        base_commit_sha: config.baseCommitSha,
+        head_commit_sha: config.headCommitSha,
+        authentication,
+      },
+      context: config.context,
+      instructions: config.instructions,
+      skip_submodules: config.skipSubmodules,
+      max_iterations: config.maxIterations,
+      client_reference: reference,
+    };
+  }
+
+  if (config.workflow === "ai-auditor-full") {
+    return {
+      source: {
+        repository_url: config.repositoryUrl,
+        commit_sha: config.headCommitSha,
+        authentication,
+      },
+      context: config.context,
+      scope: config.scope,
+      instructions: config.instructions,
+      use_memory: config.useMemory,
+      skip_submodules: config.skipSubmodules,
+      max_iterations: config.maxIterations,
+      client_reference: reference,
+    };
+  }
+
+  if (config.workflow === "ai-auditor-finding-validation") {
+    return {
+      source: {
+        repository_url: config.repositoryUrl,
+        commit_sha: config.headCommitSha,
+        authentication,
+      },
+      context: config.context,
+      finding: config.finding,
+      skip_submodules: config.skipSubmodules,
+      client_reference: reference,
+    };
+  }
+
+  const standaloneConfig = config as StandaloneActionConfig;
+  return {
+    source: {
+      repository_url: config.repositoryUrl,
+      commit_sha: config.headCommitSha,
+      authentication,
+    },
+    contract: {
+      path: standaloneConfig.contractPath,
+      name: standaloneConfig.contractName,
+    },
+    documents:
+      standaloneConfig.designDocPath || standaloneConfig.threatModelPath
+        ? {
+            design: standaloneConfig.designDocPath,
+            threat_model: standaloneConfig.threatModelPath,
+          }
+        : undefined,
+    delivery: {
+      type: "github_pull_request",
+      pull_request_number: config.prNumber,
+    },
+    client_reference: reference,
+  };
+}
+
+function isFinding(value: unknown): value is Finding {
+  if (!value || typeof value !== "object") return false;
+  const finding = value as Partial<Finding>;
+  return (
+    typeof finding.id === "string" &&
+    typeof finding.title === "string" &&
+    ["HIGH", "MEDIUM", "LOW", "INFO"].includes(finding.severity ?? "") &&
+    Array.isArray(finding.locations) &&
+    finding.locations.every((location) => typeof location === "string") &&
+    typeof finding.description === "string" &&
+    typeof finding.recommendation === "string"
+  );
+}
+
+function readAiAuditorFindings(report: unknown): AuditFindings {
+  if (!report || typeof report !== "object" || Array.isArray(report)) {
+    throw new Error("AI Auditor returned an invalid v2 report envelope.");
+  }
+  const publicReport = report as { format?: unknown; content?: unknown };
+  if (publicReport.format === "markdown") {
+    if (typeof publicReport.content !== "string") {
+      throw new Error("AI Auditor returned an invalid Markdown report.");
+    }
+    throw new Error(
+      "AI Auditor returned a Markdown report; structured JSON findings are required by this action.",
+    );
+  }
+  if (publicReport.format !== "json" || !("content" in publicReport)) {
+    throw new Error("AI Auditor returned an invalid v2 report envelope.");
+  }
+  const content = publicReport.content;
+  if (!content || typeof content !== "object" || Array.isArray(content)) {
+    throw new Error("AI Auditor returned an invalid JSON report.");
+  }
+  const findings = (content as { findings?: unknown }).findings;
+  if (!findings || typeof findings !== "object") {
+    throw new Error("AI Auditor v2 report is missing structured findings.");
+  }
+  const candidate = findings as Partial<AuditFindings>;
+  const buckets = {
+    highs: "HIGH",
+    mediums: "MEDIUM",
+    lows: "LOW",
+    infos: "INFO",
+  } as const;
+  for (const [key, expectedSeverity] of Object.entries(buckets) as [
+    keyof typeof buckets,
+    Severity,
+  ][]) {
+    if (
+      !Array.isArray(candidate[key]) ||
+      !candidate[key].every(
+        (finding) =>
+          isFinding(finding) && finding.severity === expectedSeverity,
+      )
+    ) {
+      throw new Error(`AI Auditor v2 report has invalid ${key}.`);
+    }
+  }
+  return candidate as AuditFindings;
+}
+
+function isStatusCounts(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        typeof (entry as { status?: unknown }).status === "string" &&
+        Number.isSafeInteger((entry as { count?: unknown }).count) &&
+        (entry as { count: number }).count >= 0,
+    )
+  );
+}
+
+function readStandaloneReport(report: unknown): AissRunReport {
+  if (!report || typeof report !== "object") {
+    throw new Error("Standalone workflow returned an invalid v2 report.");
+  }
+  const candidate = report as Partial<AissRunReport>;
+  if (
+    typeof candidate.schema_version !== "string" ||
+    (candidate.backend !== "prover" &&
+      candidate.backend !== "foundry" &&
+      candidate.backend !== null) ||
+    typeof candidate.contract_name !== "string" ||
+    ![
+      "verified",
+      "verified_with_gaps",
+      "partial",
+      "issues_found",
+      "unknown",
+    ].includes(candidate.outcome ?? "") ||
+    !isStatusCounts(candidate.rule_counts) ||
+    !Array.isArray(candidate.skipped) ||
+    !Array.isArray(candidate.gave_up_components) ||
+    !candidate.coverage ||
+    typeof candidate.coverage !== "object" ||
+    !Number.isSafeInteger(candidate.coverage.total_properties) ||
+    candidate.coverage.total_properties < 0 ||
+    !Number.isSafeInteger(candidate.coverage.total_rules) ||
+    candidate.coverage.total_rules < 0 ||
+    !Number.isSafeInteger(candidate.coverage.total_groups) ||
+    candidate.coverage.total_groups < 0 ||
+    typeof candidate.coverage.property_coverage_complete !== "boolean" ||
+    !Array.isArray(candidate.coverage.properties_in_no_group) ||
+    !Array.isArray(candidate.coverage.rules_spanning_multiple_groups) ||
+    !Number.isSafeInteger(candidate.coverage.skipped_count) ||
+    candidate.coverage.skipped_count < 0 ||
+    !Number.isSafeInteger(candidate.coverage.gave_up_component_count) ||
+    candidate.coverage.gave_up_component_count < 0 ||
+    !Number.isSafeInteger(candidate.coverage.dropped_orphan_rules) ||
+    candidate.coverage.dropped_orphan_rules < 0 ||
+    !Array.isArray(candidate.coverage.warnings) ||
+    !candidate.coverage.warnings.every((warning) => typeof warning === "string")
+  ) {
+    throw new Error("Standalone workflow returned a malformed v2 report.");
+  }
+  return candidate as AissRunReport;
+}
+
+function readModelVerdict(
+  value: unknown,
+): FindingValidationModelVerdict | null | undefined {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    (candidate.verdict !== "VALID" && candidate.verdict !== "INVALID") ||
+    (candidate.severity !== undefined &&
+      candidate.severity !== null &&
+      typeof candidate.severity !== "string") ||
+    (candidate.reasoning !== undefined &&
+      typeof candidate.reasoning !== "string")
+  ) {
+    return undefined;
+  }
+  return {
+    verdict: candidate.verdict,
+    severity:
+      typeof candidate.severity === "string" ? candidate.severity : null,
+    reasoning:
+      typeof candidate.reasoning === "string" ? candidate.reasoning : "",
+  };
+}
+
+function readFindingValidationReport(
+  report: PublicReport,
+): FindingValidationReport | null {
+  if (
+    report.format !== "json" ||
+    !report.content ||
+    typeof report.content !== "object" ||
+    Array.isArray(report.content)
+  ) {
+    return null;
+  }
+  const candidate = report.content as Record<string, unknown>;
+  const consensusMethods = new Set([
+    "unanimous_valid",
+    "unanimous_invalid",
+    "tiebreaker_valid",
+    "tiebreaker_invalid",
+  ]);
+  const claudeVerdict = readModelVerdict(candidate.claude_verdict);
+  const gptVerdict = readModelVerdict(candidate.gpt_verdict);
+  const tiebreakerVerdict = readModelVerdict(
+    candidate.tiebreaker_verdict ?? null,
+  );
+  if (
+    (candidate.final_verdict !== "VALID" &&
+      candidate.final_verdict !== "INVALID") ||
+    (candidate.final_severity !== null &&
+      typeof candidate.final_severity !== "string") ||
+    typeof candidate.consensus_method !== "string" ||
+    !consensusMethods.has(candidate.consensus_method) ||
+    typeof candidate.analysis_status !== "string" ||
+    claudeVerdict === undefined ||
+    gptVerdict === undefined ||
+    tiebreakerVerdict === undefined
+  ) {
+    return null;
+  }
+  const optionalString = (key: string): string =>
+    typeof candidate[key] === "string" ? candidate[key] : "";
+  return {
+    final_verdict: candidate.final_verdict,
+    final_severity: candidate.final_severity,
+    severity_reasoning: optionalString("severity_reasoning"),
+    impact: optionalString("impact"),
+    likelihood: optionalString("likelihood"),
+    false_positive_reasoning:
+      typeof candidate.false_positive_reasoning === "string"
+        ? candidate.false_positive_reasoning
+        : null,
+    consensus_method:
+      candidate.consensus_method as FindingValidationReport["consensus_method"],
+    analysis_status: candidate.analysis_status,
+    claude_verdict: claudeVerdict,
+    gpt_verdict: gptVerdict,
+    tiebreaker_verdict: tiebreakerVerdict,
+  };
+}
+
+function validateResultIdentity(
+  result: RunResult,
+  runId: string,
+  config: ActionConfig,
+): void {
+  if (
+    result.schema_version !== "1" ||
+    result.run_id !== runId ||
+    result.run_type !== workflowRunType(config.workflow)
+  ) {
+    throw new Error("Certora returned a result for a different run.");
+  }
+  if (isStandaloneConfig(config)) {
+    if (
+      result.run_type !== "auto_prover" &&
+      result.run_type !== "auto_foundry"
+    ) {
+      throw new Error("Certora returned a result for a different workflow.");
+    }
+    if (
+      result.data.contract.path !== config.contractPath ||
+      result.data.contract.name !== config.contractName
+    ) {
+      throw new Error("Certora returned a result for a different contract.");
+    }
+  } else if (
+    isFindingValidationConfig(config) &&
+    result.run_type !== "ai_auditor_finding_validation"
+  ) {
+    throw new Error("Certora returned a result for a different workflow.");
+  }
+}
+
+function validateRunIdentity(
+  run: Run,
+  config: ActionConfig,
+  expectedRunId: string,
+  expectedSourceCommitSha = config.headCommitSha,
+): void {
+  const expectedCommit = expectedSourceCommitSha.toLowerCase();
+  const actualCommit =
+    config.workflow === "ai-auditor-diff"
+      ? run.source.head_commit_sha
+      : run.source.commit_sha;
+  const baseCommitMatches =
+    config.workflow !== "ai-auditor-diff" ||
+    run.source.base_commit_sha?.toLowerCase() ===
+      config.baseCommitSha.toLowerCase();
+  if (
+    run.id !== expectedRunId ||
+    run.run_type !== workflowRunType(config.workflow) ||
+    run.source.repository_url.toLowerCase() !==
+      config.repositoryUrl.toLowerCase() ||
+    actualCommit?.toLowerCase() !== expectedCommit ||
+    !baseCommitMatches ||
+    run.client_reference !== clientReference(config, expectedSourceCommitSha)
+  ) {
+    throw new Error("Certora returned a run for a different source.");
+  }
+  if (
+    isStandaloneConfig(config) &&
+    (run.delivery?.type !== "github_pull_request" ||
+      run.delivery.pull_request_number !== config.prNumber)
+  ) {
+    throw new Error(
+      "Certora returned a run bound to a different pull request.",
+    );
+  }
+}
+
+let activeRun: { api: ZeusApi; runId: string; config: ActionConfig } | null =
+  null;
+let shutdownHandlersRegistered = false;
+let shuttingDown = false;
 
 async function requestCancellation(
   api: ZeusApi,
-  jobId: string,
-): Promise<CancelAuditResponse | null> {
-  try {
-    const response = await api.cancelAudit(jobId);
-    core.info(cancellationSummary(response));
-    return response;
-  } catch (error) {
-    core.warning(
-      `Failed to request cancellation: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return null;
-  }
+  runId: string,
+  config: ActionConfig,
+  deadlineMs?: number,
+): Promise<Run> {
+  const response =
+    deadlineMs === undefined
+      ? await api.cancelRun(runId)
+      : await api.cancelRun(runId, deadlineMs);
+  validateRunIdentity(response.run, config, runId);
+  core.info(
+    `Cancellation request accepted; run status is ${response.run.status}.`,
+  );
+  return response.run;
 }
 
-function registerShutdownHandlers() {
+function registerShutdownHandlers(): void {
   if (shutdownHandlersRegistered) return;
   shutdownHandlersRegistered = true;
-
   const handler = async (signal: string) => {
-    if (activeAudit) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    if (activeRun) {
       core.info(
-        `Received ${signal} — requesting cancellation for Zeus audit ${activeAudit.jobId}...`,
+        `Received ${signal}; requesting cancellation for Certora run ${activeRun.runId}...`,
       );
-      await requestCancellation(activeAudit.api, activeAudit.jobId);
+      try {
+        await requestCancellation(
+          activeRun.api,
+          activeRun.runId,
+          activeRun.config,
+          Date.now() + SHUTDOWN_CANCEL_TIMEOUT_MS,
+        );
+      } catch (error) {
+        core.warning(
+          `Failed to request cancellation: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
     process.exit(1);
   };
-
   process.on("SIGTERM", () => void handler("SIGTERM"));
   process.on("SIGINT", () => void handler("SIGINT"));
 }
 
-export async function run(): Promise<void> {
-  registerShutdownHandlers();
-  activeAudit = null;
-  // ── Phase 1: Validate Inputs ──
-  core.info("Phase 1: Validating inputs...");
-  const config = getConfig();
-  initializeOutputs();
-  core.setOutput("engine", config.engine);
-  core.info(`Target: ${config.target}`);
-  core.info(`Engine: ${config.engine}`);
-  core.info(`Base SHA: ${config.branchStarting}`);
-  core.info(`Head SHA: ${config.branchEnding}`);
-  if (config.engine === "ai-auditor") {
-    core.info(`Audit type: ${config.auditType}`);
-    core.info(`Context patterns: ${config.context.join(", ")}`);
-  } else {
-    core.info(`Contract: ${config.contractPath} (${config.contractName})`);
+async function publishStandaloneResult(args: {
+  api: ZeusApi;
+  config: StandaloneActionConfig;
+  ghClient: GitHubClient;
+  run: Run;
+  runId: string;
+  requireCommitSha?: string;
+}): Promise<void> {
+  const { api, config, ghClient, run, runId, requireCommitSha } = args;
+  const resultResponse = await api.getResult(runId);
+  validateResultIdentity(resultResponse.result, runId, config);
+  if (
+    resultResponse.result.run_type !== "auto_prover" &&
+    resultResponse.result.run_type !== "auto_foundry"
+  ) {
+    throw new Error("Standalone workflow returned an AI Auditor result.");
   }
-
-  const api = new ZeusApi(config.apiBaseUrl, config.apiKey);
-  if (config.engine !== "ai-auditor") {
-    const ghClient = new GitHubClient(config.githubToken);
-    const generatedJobId = await ghClient.getGeneratedFollowupJobId(
-      config.branchEnding,
+  const report = readStandaloneReport(resultResponse.result.data.report);
+  if (report.contract_name !== config.contractName) {
+    throw new Error(
+      "Standalone workflow returned a report for a different contract.",
     );
-    if (generatedJobId) {
-      await runGeneratedFollowup(config, api, ghClient, generatedJobId);
-      return;
+  }
+  const expectedBackend =
+    config.workflow === "auto-prover" ? "prover" : "foundry";
+  if (report.backend !== null && report.backend !== expectedBackend) {
+    throw new Error(
+      "Standalone workflow returned a report from a different backend.",
+    );
+  }
+  const commit = await api.commitGeneratedFiles(runId);
+  if (
+    !requireCommitSha &&
+    commit.delivery.status === "committed" &&
+    commit.delivery.commit_sha?.toLowerCase() ===
+      config.headCommitSha.toLowerCase()
+  ) {
+    throw new Error(
+      "Generated-file delivery claimed a commit but left the pull request head unchanged.",
+    );
+  }
+
+  if (requireCommitSha) {
+    if (
+      commit.delivery.commit_sha?.toLowerCase() !==
+      requireCommitSha.toLowerCase()
+    ) {
+      throw new Error(
+        `Generated follow-up commit mismatch: expected ${requireCommitSha}, received ${commit.delivery.commit_sha ?? "none"}.`,
+      );
     }
   }
 
-  // ── Phase 2: Create Audit ──
-  core.info(`Phase 2: Creating ${config.engine} audit...`);
+  core.setOutput("run-id", runId);
+  core.setOutput("workflow", config.workflow);
+  core.setOutput("status", run.status);
+  core.setOutput("run-outcome", report.outcome);
+  core.setOutput(
+    "generated-files",
+    commit.delivery.files.map((file) => file.path).join(","),
+  );
+  core.setOutput(
+    "generated-commit-sha",
+    commit.delivery.status === "committed"
+      ? (commit.delivery.commit_sha ?? "")
+      : "",
+  );
 
-  let createResponse;
-  if (config.engine !== "ai-auditor") {
-    createResponse = await api.createStandaloneAudit({
-      engine: config.engine,
-      target: config.target,
-      branch: config.branchEnding,
-      pull_request_number: config.prNumber,
-      contract_path: config.contractPath,
-      contract_name: config.contractName,
-      design_doc_path: config.designDocPath,
-      threat_model_path: config.threatModelPath,
-      token: config.githubToken,
-    });
-  } else if (config.auditType === "full") {
-    createResponse = await api.createFullAudit({
-      engine: "ai-auditor",
-      target: config.target,
-      branch: config.branchEnding,
-      context: config.context,
-      scope: config.scope,
-      preprompt: config.preprompt,
-      use_memory: config.useMemory,
-      token: config.githubToken,
-      skip_submodules: config.skipSubmodules,
-      max_iterations: config.maxIterations,
-    });
-  } else {
-    createResponse = await api.createDiffAudit({
-      target: config.target,
-      branch_starting: config.branchStarting,
-      branch_ending: config.branchEnding,
-      context: config.context,
-      preprompt: config.preprompt,
-      token: config.githubToken,
-      skip_submodules: config.skipSubmodules,
-      max_iterations: config.maxIterations,
-    });
+  for (const warning of getStandaloneWarnings(report, config.workflow)) {
+    core.warning(warning);
   }
 
-  const jobId = createResponse.job_id;
-  activeAudit = { api, jobId };
-  core.setOutput("job-id", jobId);
-  const remainingBalance = firstFiniteNumber(
-    createResponse.current_balance_usd,
-    createResponse.remaining_credits,
-  );
-  core.info(
-    remainingBalance === null
-      ? `Audit created: ${jobId}`
-      : `Audit created: ${jobId} (${formatUsd(remainingBalance)} balance remaining)`,
-  );
+  if (config.commentOnPr) {
+    await ghClient.upsertPrComment(
+      config.prNumber,
+      formatStandalonePrComment({
+        workflow: config.workflow,
+        runId,
+        cost: parseUsd(run.billing.charged_usd),
+        report,
+        commit,
+      }),
+      prCommentMarker(config.workflow),
+    );
+  }
 
-  // ── Phase 3: Poll for Completion ──
-  core.info("Phase 3: Polling for completion...");
-  const startTime = Date.now();
-  const timeoutMs = config.timeout * 60 * 1000;
-  const deadlineMs = startTime + timeoutMs;
-  let resultDeadlineMs = deadlineMs;
-  const timeoutLabel = `${config.timeout} ${config.timeout === 1 ? "minute" : "minutes"}`;
+  if (isFailingStandaloneOutcome(report.outcome)) {
+    core.setFailed(
+      config.workflow === "auto-foundry"
+        ? "auto-foundry found one or more failing generated tests."
+        : "auto-prover found one or more violated properties or rules.",
+    );
+  }
+}
+
+async function tryGeneratedFollowup(
+  config: StandaloneActionConfig,
+  api: ZeusApi,
+  ghClient: GitHubClient,
+): Promise<boolean> {
+  const followup = await ghClient.getGeneratedFollowup(config.headCommitSha);
+  if (!followup) return false;
+
+  const response = await api.getRun(followup.runId);
+  validateRunIdentity(
+    response.run,
+    config,
+    followup.runId,
+    followup.sourceCommitSha,
+  );
+  if (
+    response.run.status !== "succeeded" ||
+    response.run.delivery?.status !== "succeeded" ||
+    response.run.delivery.outcome !== "committed" ||
+    response.run.delivery.commit_sha?.toLowerCase() !==
+      config.headCommitSha.toLowerCase()
+  ) {
+    throw new Error(
+      "Generated follow-up references an incompatible Certora run.",
+    );
+  }
+  await publishStandaloneResult({
+    api,
+    config,
+    ghClient,
+    run: response.run,
+    runId: followup.runId,
+    requireCommitSha: config.headCommitSha,
+  });
+  return true;
+}
+
+async function pollRun(
+  api: ZeusApi,
+  initialRun: Run,
+  runId: string,
+  config: ActionConfig,
+  pollIntervalSeconds: number,
+  timeoutMinutes: number,
+): Promise<Run | null> {
+  const deadlineMs = Date.now() + timeoutMinutes * 60_000;
+  let run = initialRun;
   let consecutiveFailures = 0;
-  let finalStatus = "pending";
-  let finalError: string | null | undefined;
-  let providerTerminal = false;
 
-  while (true) {
-    const elapsed = Date.now() - startTime;
-    if (elapsed >= timeoutMs) {
-      if (providerTerminal) {
-        activeAudit = null;
-        core.warning(
-          `Timeout exceeded (${timeoutLabel}) while waiting for final billing settlement. The terminal provider workflow will not be cancelled.`,
-        );
-        core.setOutput("status", finalStatus);
-        core.setFailed(
-          `Audit reached provider status ${finalStatus}, but final billing settlement did not finish within ${timeoutLabel}.`,
-        );
-      } else {
-        core.warning(
-          `Timeout exceeded (${timeoutLabel}). Requesting cancellation...`,
-        );
-        const cancellation = await requestCancellation(api, jobId);
-        const authoritativeStatus = await statusAfterCancellationAttempt(
-          api,
-          jobId,
-        );
-        if (authoritativeStatus?.status === "succeeded") {
-          finalStatus = "succeeded";
-          providerTerminal = true;
-          activeAudit = null;
-          if (
-            config.engine === "ai-auditor" ||
-            authoritativeStatus.completed_at
-          ) {
-            resultDeadlineMs = Date.now() + API_REQUEST_TIMEOUT_MS;
-            core.info(
-              "The audit completed while cancellation was being requested; continuing with its successful result.",
-            );
-            break;
-          }
-          core.setOutput("status", finalStatus);
-          core.setFailed(
-            `Audit reached provider status succeeded, but final billing settlement did not finish within ${timeoutLabel}.`,
+  while (
+    run.status !== "succeeded" &&
+    run.status !== "failed" &&
+    run.status !== "cancelled"
+  ) {
+    if (Date.now() >= deadlineMs) {
+      if (run.cancellable) {
+        try {
+          run = await requestCancellation(
+            api,
+            runId,
+            config,
+            Date.now() + CANCELLATION_REQUEST_TIMEOUT_MS,
           );
-          return;
+        } catch (error) {
+          core.warning(
+            `Failed to request cancellation after timeout: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
-        activeAudit = null;
-        core.setOutput("status", cancellation?.status ?? "failed");
-        const cancellationResult =
-          cancellation?.status === "cancelled"
-            ? "Cancellation was confirmed."
-            : cancellation?.status === "cancellation_pending"
-              ? "Cancellation was requested and is still being reconciled."
-              : cancellation?.status === "failed"
-                ? "The audit reached a failed state."
-                : "Cancellation could not be confirmed.";
-        core.setFailed(
-          `Audit timed out after ${timeoutLabel}. ${cancellationResult}`,
-        );
       }
-      return;
+      if (
+        run.status === "succeeded" ||
+        run.status === "failed" ||
+        run.status === "cancelled"
+      ) {
+        return run;
+      }
+      core.setOutput("status", run.status);
+      core.setFailed(
+        `Certora run timed out after ${timeoutMinutes} ${timeoutMinutes === 1 ? "minute" : "minutes"}; last status: ${run.status}.`,
+      );
+      return null;
     }
+
+    const delay = Math.min(
+      pollIntervalSeconds * 1000,
+      Math.max(0, deadlineMs - Date.now()),
+    );
+    if (delay > 0) await sleep(delay);
+    if (Date.now() >= deadlineMs) continue;
 
     try {
-      const progress = await api.getProgress(jobId, deadlineMs);
-      finalStatus = progress.status;
-      const currentCost = firstFiniteNumber(
-        progress.billed_amount_usd,
-        progress.actual_cost_usd,
-      );
-
-      core.info(
-        `[${Math.round(elapsed / 60000)}m] Status: ${progress.status} | ` +
-          `Phase: ${progress.current_phase} | ` +
-          `Progress: ${progress.progress_percent.toFixed(1)}% | ` +
-          `Cost: ${formatUsd(currentCost)}`,
-      );
-
-      if (
-        config.engine !== "ai-auditor" &&
-        (progress.status === "succeeded" ||
-          progress.status === "failed" ||
-          progress.status === "cancelled")
-      ) {
-        providerTerminal = true;
-        activeAudit = null;
-        const status = await api.getStatus(jobId, deadlineMs);
-        finalStatus = status.status;
-        finalError = status.error;
-        if (status.completed_at) break;
-        core.info(
-          "Provider work is complete; waiting for final billing settlement...",
-        );
-      } else if (progress.status === "succeeded") {
-        break;
-      } else if (
-        progress.status === "failed" ||
-        progress.status === "cancelled"
-      ) {
-        break;
-      }
-      // Reset only after the entire poll iteration succeeds. In particular, a
-      // successful progress request must not erase a failure from the
-      // settlement-status request that follows it.
+      const polledRun = (await api.getRun(runId, deadlineMs)).run;
+      validateRunIdentity(polledRun, config, runId);
+      run = polledRun;
       consecutiveFailures = 0;
+      const progress = run.progress;
+      core.info(
+        progress
+          ? `Status: ${run.status} | Phase: ${progress.phase}${progress.percent === null ? "" : ` | Progress: ${progress.percent.toFixed(1)}%`}`
+          : `Status: ${run.status}`,
+      );
     } catch (error) {
-      consecutiveFailures++;
+      consecutiveFailures += 1;
       core.warning(
-        `Poll failed (${consecutiveFailures}/${MAX_CONSECUTIVE_POLL_FAILURES}): ${error instanceof Error ? error.message : String(error)}`,
+        `Run poll failed (${consecutiveFailures}/${MAX_CONSECUTIVE_POLL_FAILURES}): ${error instanceof Error ? error.message : String(error)}`,
       );
-
       if (consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
-        let cancellation: CancelAuditResponse | null = null;
-        if (!providerTerminal) {
-          core.warning(
-            "The audit is still non-terminal; requesting cancellation before the action exits.",
-          );
-          cancellation = await requestCancellation(api, jobId);
-        }
-        const authoritativeStatus = await statusAfterCancellationAttempt(
-          api,
-          jobId,
-        );
-        if (authoritativeStatus?.status === "succeeded") {
-          finalStatus = "succeeded";
-          providerTerminal = true;
-          activeAudit = null;
-          if (
-            config.engine === "ai-auditor" ||
-            authoritativeStatus.completed_at
-          ) {
-            resultDeadlineMs = Date.now() + API_REQUEST_TIMEOUT_MS;
-            core.info(
-              "The audit completed while cancellation was being requested; continuing with its successful result.",
+        if (run.cancellable) {
+          try {
+            run = await requestCancellation(
+              api,
+              runId,
+              config,
+              Date.now() + CANCELLATION_REQUEST_TIMEOUT_MS,
             );
-            break;
+          } catch (cancelError) {
+            core.warning(
+              `Failed to request cancellation after polling failed: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`,
+            );
           }
-          core.setOutput("status", finalStatus);
-          core.setFailed(
-            "Audit reached provider status succeeded, but final billing settlement could not be confirmed after polling failed.",
-          );
-          return;
         }
-        activeAudit = null;
-        core.setOutput(
-          "status",
-          providerTerminal ? finalStatus : (cancellation?.status ?? "failed"),
-        );
-        const cancellationResult = providerTerminal
-          ? "The provider workflow was already terminal and was not cancelled."
-          : cancellation?.status === "cancelled"
-            ? "Cancellation was confirmed."
-            : cancellation?.status === "cancellation_pending"
-              ? "Cancellation was requested and is still being reconciled."
-              : cancellation?.status === "failed"
-                ? "The audit reached a failed state."
-                : "Cancellation could not be confirmed.";
+        if (
+          run.status === "succeeded" ||
+          run.status === "failed" ||
+          run.status === "cancelled"
+        ) {
+          return run;
+        }
+        core.setOutput("status", run.status);
         core.setFailed(
-          `Lost connection to the Zeus API after ${MAX_CONSECUTIVE_POLL_FAILURES} consecutive failures. ${cancellationResult}`,
+          `Lost connection to the Certora API after ${MAX_CONSECUTIVE_POLL_FAILURES} consecutive failures; last status: ${run.status}.`,
         );
-        return;
+        return null;
       }
     }
-
-    const remainingBeforeNextPoll = deadlineMs - Date.now();
-    if (remainingBeforeNextPoll > 0) {
-      await sleep(
-        Math.min(config.pollInterval * 1000, remainingBeforeNextPoll),
-      );
-    }
   }
+  return run;
+}
 
-  activeAudit = null;
-  core.setOutput("status", finalStatus);
-
-  if (finalStatus === "failed") {
-    if (finalError === undefined) {
-      try {
-        const status = await api.getStatus(
-          jobId,
-          Date.now() + API_REQUEST_TIMEOUT_MS,
-        );
-        finalError = status.error;
-      } catch (error) {
-        core.warning(
-          `Could not retrieve final audit failure details: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-    core.setFailed(`Audit failed: ${finalError ?? "Unknown error"}`);
-    return;
+async function publishFindingValidationResult(
+  api: ZeusApi,
+  config: FindingValidationActionConfig,
+  run: Run,
+  runId: string,
+): Promise<void> {
+  const response = await api.getResult(runId);
+  validateResultIdentity(response.result, runId, config);
+  if (response.result.run_type !== "ai_auditor_finding_validation") {
+    throw new Error("AI Auditor returned a result for a different workflow.");
   }
-
-  if (finalStatus === "cancelled") {
-    core.setFailed("Audit was cancelled.");
-    return;
-  }
-
-  // ── Phase 4: Fetch Results & Create Issues ──
-  core.info("Phase 4: Fetching results...");
-  const result = await waitForPersistedResult(
-    api,
-    jobId,
-    resultDeadlineMs,
-    timeoutLabel,
-    config.pollInterval * 1000,
-    finalStatus,
-  );
-  if (!result) return;
-
-  if (config.engine !== "ai-auditor") {
-    if (!isExpectedStandaloneResult(result, jobId, config)) {
-      throw new Error(
-        `${config.engine} returned an unexpected persisted audit result.`,
-      );
-    }
-
-    core.info("Committing generated files to the pull request branch...");
-    const generatedCommit = await api.commitGeneratedFiles(jobId, {
-      pull_request_number: config.prNumber,
-      token: config.githubToken,
-    });
-    const generatedPaths = generatedCommit.files.map((file) => file.path);
-    // Older API deployments did not return this discriminator; preserve their
-    // successful-commit behavior while honoring the explicit new no-op state.
-    const commitCreated = generatedCommit.commit_created !== false;
-    const outcome = readAissOutcome(result.result);
-    const failingOutcome = isFailingStandaloneOutcome(outcome);
-
-    core.setOutput("highs-count", "0");
-    core.setOutput("mediums-count", "0");
-    core.setOutput("lows-count", "0");
-    core.setOutput("infos-count", "0");
-    core.setOutput("issues-created", "");
-    core.setOutput("run-outcome", outcome);
-    core.setOutput("generated-files", generatedPaths.join(","));
-    core.setOutput(
-      "generated-commit-sha",
-      commitCreated ? generatedCommit.commit_sha : "",
-    );
-
-    if (!commitCreated) {
-      core.warning(
-        "No generated files needed to be committed. The pull request head is unchanged, so the current check remains authoritative.",
-      );
-    }
-
-    for (const warning of getStandaloneWarnings(
-      result.result.report_state,
-      result.result.report,
-      config.engine,
-    )) {
-      core.warning(warning);
-    }
-
-    const ghClient = new GitHubClient(config.githubToken);
-    if (config.commentOnPr) {
-      const billedCostUsd =
-        firstFiniteNumber(result.billed_amount_usd, result.actual_cost_usd) ??
-        0;
-      const comment = formatStandalonePrComment({
-        engine: config.engine,
-        jobId,
-        cost: billedCostUsd,
-        reportState: result.result.report_state,
-        report: result.result.report,
-        commit: generatedCommit,
-      });
-      await ghClient.upsertPrComment(config.prNumber, comment);
-    }
-
-    if (failingOutcome) {
-      core.setFailed(standaloneFailureMessage(config.engine));
-      return;
-    }
-
-    core.info(
-      `${config.engine} CI completed with outcome ${outcome} and committed ${generatedPaths.length} generated files.`,
-    );
-    return;
-  }
-
-  // Handle legacy markdown result
-  if (typeof result.result === "string") {
+  const report = response.result.data.report;
+  const parsed = readFindingValidationReport(report);
+  if (parsed) {
+    core.setOutput("validation-verdict", parsed.final_verdict);
+    core.setOutput("validation-severity", parsed.final_severity ?? "");
+  } else {
     core.warning(
-      "Audit returned a legacy markdown report. Structured findings are not available.",
+      "Finding validation completed, but its public report did not contain the recognized structured verdict shape.",
     );
-    core.setOutput("highs-count", "0");
-    core.setOutput("mediums-count", "0");
-    core.setOutput("lows-count", "0");
-    core.setOutput("infos-count", "0");
-    core.setOutput("issues-created", "");
+  }
 
-    if (config.commentOnPr) {
-      const ghClient = new GitHubClient(config.githubToken);
-      const comment = formatLegacyPrComment(
-        result.result,
-        jobId,
-        config.prNumber,
+  if (config.commentOnPr) {
+    await new GitHubClient(config.githubToken).upsertPrComment(
+      config.prNumber,
+      formatFindingValidationPrComment({
+        runId,
+        cost: parseUsd(run.billing.charged_usd),
+        report,
+        parsed,
+      }),
+      prCommentMarker(config.workflow),
+    );
+  }
+}
+
+async function publishAiAuditorResult(
+  api: ZeusApi,
+  config: AiAuditorActionConfig,
+  run: Run,
+  runId: string,
+): Promise<void> {
+  const response = await api.getResult(runId);
+  validateResultIdentity(response.result, runId, config);
+  if (
+    response.result.run_type !== "ai_auditor_full" &&
+    response.result.run_type !== "ai_auditor_diff"
+  ) {
+    throw new Error("AI Auditor returned a standalone workflow result.");
+  }
+  const report = response.result.data.report;
+  if (report.format === "markdown") {
+    core.setOutput("highs-count", "");
+    core.setOutput("mediums-count", "");
+    core.setOutput("lows-count", "");
+    core.setOutput("infos-count", "");
+    if (config.createIssues) {
+      core.warning(
+        "AI Auditor returned a Markdown report, so structured finding issues could not be created.",
       );
-      await ghClient.upsertPrComment(config.prNumber, comment);
+    }
+    if (config.commentOnPr) {
+      await new GitHubClient(config.githubToken).upsertPrComment(
+        config.prNumber,
+        formatAiAuditorMarkdownPrComment({
+          workflow: config.workflow,
+          runId,
+          cost: parseUsd(run.billing.charged_usd),
+          content: report.content,
+        }),
+        prCommentMarker(config.workflow),
+      );
+    }
+    if (config.failOn.length > 0) {
+      core.setFailed(
+        `AI Auditor returned only a Markdown report, so the fail-on policy (${config.failOn.join(", ")}) could not be evaluated.`,
+      );
     }
     return;
   }
+  const findings = readAiAuditorFindings(report);
 
-  if (!isAiAuditorResult(result.result)) {
-    throw new Error("AI Auditor returned an unexpected result payload.");
-  }
-
-  const findings = result.result.findings;
   core.setOutput("highs-count", String(findings.highs.length));
   core.setOutput("mediums-count", String(findings.mediums.length));
   core.setOutput("lows-count", String(findings.lows.length));
   core.setOutput("infos-count", String(findings.infos.length));
 
-  const totalFindings = getAllFindings(findings).length;
-  core.info(
-    `Found ${totalFindings} findings: ${findings.highs.length} HIGH, ${findings.mediums.length} MEDIUM, ${findings.lows.length} LOW, ${findings.infos.length} INFO`,
-  );
-
   const ghClient = new GitHubClient(config.githubToken);
   const issueLinks: { finding: Finding; url: string }[] = [];
-
   if (config.createIssues) {
-    const findingsToTrack = getFindingsBySeverities(
-      findings,
-      config.issueSeverities,
-    );
-
-    if (findingsToTrack.length > 0) {
-      core.info(
-        `Creating issues for ${findingsToTrack.length} findings (${config.issueSeverities.join(", ")})...`,
-      );
-
+    const selected = getFindingsBySeverities(findings, config.issueSeverities);
+    if (selected.length > 0) {
       await ghClient.ensureLabelsExist(config.labels, config.issueSeverities);
-
-      for (const finding of findingsToTrack) {
-        const issueUrl = await ghClient.createOrUpdateIssue(
+      for (const finding of selected) {
+        const reference = await ghClient.createOrUpdateIssue(
           finding,
-          jobId,
+          runId,
           config.prNumber,
           config.labels,
         );
-        if (issueUrl) {
-          issueLinks.push({ finding, url: issueUrl });
-        }
+        if (reference) issueLinks.push({ finding, url: reference });
       }
     }
   }
-
-  core.setOutput("issues-created", issueLinks.map((l) => l.url).join(","));
-
-  // ── Phase 5: PR Comment & Fail Check ──
-  core.info("Phase 5: Posting PR comment...");
+  core.setOutput(
+    "issues-created",
+    issueLinks.map((entry) => entry.url).join(","),
+  );
 
   if (config.commentOnPr) {
-    const billedCostUsd =
-      firstFiniteNumber(result.billed_amount_usd, result.actual_cost_usd) ?? 0;
-    const comment = formatPrComment(
-      findings,
-      jobId,
-      billedCostUsd,
-      issueLinks,
+    await ghClient.upsertPrComment(
       config.prNumber,
+      formatPrComment(
+        findings,
+        runId,
+        parseUsd(run.billing.charged_usd),
+        issueLinks,
+        config.prNumber,
+        config.workflow,
+      ),
+      prCommentMarker(config.workflow),
     );
-    await ghClient.upsertPrComment(config.prNumber, comment);
   }
 
-  // Check fail-on condition
-  if (config.failOn.length > 0) {
-    const failFindings = getFindingsBySeverities(findings, config.failOn);
-    if (failFindings.length > 0) {
-      core.setFailed(
-        `Found ${failFindings.length} findings matching fail-on severities: ${config.failOn.join(", ")}`,
+  const failing = getFindingsBySeverities(findings, config.failOn);
+  if (failing.length > 0) {
+    core.setFailed(
+      `AI Auditor found ${failing.length} finding${failing.length === 1 ? "" : "s"} matching fail-on (${config.failOn.join(", ")}).`,
+    );
+  }
+}
+
+export async function run(): Promise<void> {
+  registerShutdownHandlers();
+  activeRun = null;
+  initializeOutputs();
+
+  core.info("Phase 1: Validating inputs...");
+  const config = getConfig();
+  core.setOutput("workflow", config.workflow);
+  core.info(`Repository: ${config.repositoryUrl}`);
+  core.info(`Workflow: ${config.workflow}`);
+  core.info(`Base commit: ${config.baseCommitSha}`);
+  core.info(`Head commit: ${config.headCommitSha}`);
+
+  const api = new ZeusApi(config.apiBaseUrl, config.apiKey);
+  if (isStandaloneConfig(config)) {
+    const ghClient = new GitHubClient(config.githubToken);
+    if (await tryGeneratedFollowup(config, api, ghClient)) return;
+  }
+
+  const body = buildRunRequest(config);
+  core.info("Phase 2: Estimating run...");
+  const estimate = (await api.estimateRun(config.workflow, body)).estimate;
+  core.info(
+    `Estimated cost: $${estimate.estimated_cost_usd}; minimum required balance: $${estimate.minimum_balance_required_usd}; current balance: $${estimate.balance_usd}.`,
+  );
+  if (!estimate.can_launch) {
+    throw new Error(
+      `The run cannot launch: balance $${estimate.balance_usd}, minimum required $${estimate.minimum_balance_required_usd}.`,
+    );
+  }
+
+  core.info("Phase 3: Launching run...");
+  const idempotencyKey = createIdempotencyKey(
+    config.workflow,
+    body,
+    config.idempotencySeed,
+  );
+  let currentRun = (await api.createRun(config.workflow, body, idempotencyKey))
+    .run;
+  let currentRunId = currentRun.id;
+  const canonicalRunWasTerminalAtRecovery =
+    currentRun.status === "failed" || currentRun.status === "cancelled";
+  let usedAttemptScopedRetry = false;
+
+  while (true) {
+    validateRunIdentity(currentRun, config, currentRunId);
+    activeRun = { api, runId: currentRunId, config };
+    core.setOutput("run-id", currentRunId);
+    core.setOutput("status", currentRun.status);
+    core.info(`Run created or recovered: ${currentRunId}`);
+
+    core.info("Phase 4: Polling run...");
+    const terminal = await pollRun(
+      api,
+      currentRun,
+      currentRunId,
+      config,
+      config.pollInterval,
+      config.timeout,
+    );
+    activeRun = null;
+    if (!terminal) return;
+    currentRun = terminal;
+    validateRunIdentity(currentRun, config, currentRunId);
+    core.setOutput("status", currentRun.status);
+
+    if (
+      config.githubRunAttempt > 1 &&
+      canonicalRunWasTerminalAtRecovery &&
+      !usedAttemptScopedRetry &&
+      (currentRun.status === "failed" || currentRun.status === "cancelled")
+    ) {
+      usedAttemptScopedRetry = true;
+      const retryIdempotencyKey = createIdempotencyKey(
+        config.workflow,
+        body,
+        `${config.idempotencySeed}:github-rerun-attempt:${config.githubRunAttempt}`,
       );
+      core.info(
+        `GitHub rerun attempt ${config.githubRunAttempt} recovered terminal ${currentRun.status} run ${currentRunId}; launching one attempt-scoped retry.`,
+      );
+      currentRun = (
+        await api.createRun(config.workflow, body, retryIdempotencyKey)
+      ).run;
+      currentRunId = currentRun.id;
+      continue;
     }
+
+    break;
   }
 
-  core.info("AutoProver Guardian CI completed successfully.");
+  if (currentRun.status === "failed") {
+    core.setFailed(
+      `Certora run failed: ${currentRun.failure?.detail ?? "Unknown error"}`,
+    );
+    return;
+  }
+  if (currentRun.status === "cancelled") {
+    core.setFailed("Certora run was cancelled.");
+    return;
+  }
+
+  core.info("Phase 5: Processing result...");
+  if (isStandaloneConfig(config)) {
+    await publishStandaloneResult({
+      api,
+      config,
+      ghClient: new GitHubClient(config.githubToken),
+      run: currentRun,
+      runId: currentRunId,
+    });
+  } else if (isFindingValidationConfig(config)) {
+    await publishFindingValidationResult(api, config, currentRun, currentRunId);
+  } else {
+    await publishAiAuditorResult(api, config, currentRun, currentRunId);
+  }
+
+  core.info(
+    `${workflowEngine(config.workflow)} run ${currentRunId} completed with status ${currentRun.status}.`,
+  );
 }

@@ -1,483 +1,473 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import {
+  createIdempotencyKey,
   getZeusApiErrorMessage,
   ZeusApi,
-  ZeusApiDeadlineError,
   ZeusApiError,
 } from "../src/api";
-import { API_REQUEST_TIMEOUT_MS } from "../src/constants";
+import type {
+  AiAuditorFullRunRequest,
+  Run,
+  RunRequest,
+  Workflow,
+} from "../src/types";
+import { workflowRunType } from "../src/types";
 
-describe("ZeusApi", () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
-  });
+const body: AiAuditorFullRunRequest = {
+  source: {
+    repository_url: "https://github.com/Certora/contracts",
+    commit_sha: "a".repeat(40),
+    authentication: { type: "organization_github_app" },
+  },
+  context: ["contracts/**/*.sol"],
+  use_memory: true,
+};
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
+const run: Run = {
+  id: "11111111-1111-4111-8111-111111111111",
+  run_type: "ai_auditor_full",
+  status: "queued",
+  source: {
+    repository_url: body.source.repository_url,
+    commit_sha: body.source.commit_sha,
+  },
+  client_reference: null,
+  progress: null,
+  result: { available: false },
+  billing: { status: "reserved", reserved_usd: "10.0000", charged_usd: null },
+  failure: null,
+  delivery: null,
+  cancellable: true,
+  created_at: "2026-08-07T00:00:00.000Z",
+  started_at: null,
+  completed_at: null,
+  dashboard_url: "https://zeus.certora.com/runs/1",
+};
 
-  it("forwards use_memory when creating a full audit", async () => {
+describe("ZeusApi v2", () => {
+  beforeEach(() => vi.restoreAllMocks());
+  afterEach(() => vi.useRealTimers());
+
+  it("estimates through the workflow collection with Bearer authentication", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response(
         JSON.stringify({
-          job_id: "job-1",
-          status: "pending",
-          audit_type: "full",
-          remaining_credits: 10,
+          request_id: "req-1",
+          estimate: {
+            estimated_cost_usd: "12.5000",
+            minimum_balance_required_usd: "10.0000",
+            balance_usd: "100.0000",
+            can_launch: true,
+          },
         }),
         { status: 200 },
       ),
     );
+    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
 
-    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
+    await api.estimateRun("ai-auditor-full", body);
 
-    await api.createFullAudit({
-      engine: "ai-auditor",
-      target: "https://github.com/Certora/autoprover-guardian-ci",
-      branch: "a".repeat(40),
-      context: ["contracts/**/*.sol"],
-      use_memory: false,
-    });
-
-    const requestBody = JSON.parse(
-      fetchMock.mock.calls[0]?.[1]?.body as string,
-    ) as Record<string, unknown>;
-    expect(requestBody.use_memory).toBe(false);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://zeus.certora.com/v2/ai-auditor-full-runs/estimate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(body),
+        redirect: "error",
+        headers: expect.objectContaining({
+          Authorization: "Bearer certora_test",
+        }),
+      }),
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty(
+      "X-API-Key",
+    );
   });
 
-  it.each(["full", "diff"] as const)(
-    "does not retry %s audit creation after an ambiguous server failure",
-    async (auditType) => {
-      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+  it("accepts a negative balance in an insufficient-balance estimate", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          request_id: "req-1",
+          estimate: {
+            estimated_cost_usd: "12.5000",
+            minimum_balance_required_usd: "10.0000",
+            balance_usd: "-2.7500",
+            can_launch: false,
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    const api = new ZeusApi("https://app.certora.com", "certora_test");
+
+    await expect(api.estimateRun("ai-auditor-full", body)).resolves.toEqual({
+      request_id: "req-1",
+      estimate: {
+        estimated_cost_usd: "12.5000",
+        minimum_balance_required_usd: "10.0000",
+        balance_usd: "-2.7500",
+        can_launch: false,
+      },
+    });
+  });
+
+  it("rejects non-canonical USD precision", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          request_id: "req-1",
+          estimate: {
+            estimated_cost_usd: "12.50",
+            minimum_balance_required_usd: "10.0000",
+            balance_usd: "100.0000",
+            can_launch: true,
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    const api = new ZeusApi("https://app.certora.com", "certora_test");
+
+    await expect(api.estimateRun("ai-auditor-full", body)).rejects.toThrow(
+      "malformed estimate",
+    );
+  });
+
+  it("launches with the required stable Idempotency-Key", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ request_id: "req-1", run }), {
+        status: 201,
+      }),
+    );
+    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+    const key = createIdempotencyKey(
+      "ai-auditor-full",
+      body,
+      "run-1:attempt-1",
+    );
+
+    await api.createRun("ai-auditor-full", body, key);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://zeus.certora.com/v2/ai-auditor-full-runs",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ "Idempotency-Key": key }),
+      }),
+    );
+    expect(
+      createIdempotencyKey("ai-auditor-full", body, "run-1:attempt-1"),
+    ).toBe(key);
+    expect(
+      createIdempotencyKey("ai-auditor-full", body, "run-1:attempt-2"),
+    ).not.toBe(key);
+    expect(
+      createIdempotencyKey(
+        "ai-auditor-full",
+        { ...body, context: ["src/**/*.sol"] },
+        "run-1:attempt-1",
+      ),
+    ).not.toBe(key);
+  });
+
+  it.each<[Workflow, string]>([
+    ["ai-auditor-full", "/v2/ai-auditor-full-runs"],
+    ["ai-auditor-diff", "/v2/ai-auditor-diff-runs"],
+    [
+      "ai-auditor-finding-validation",
+      "/v2/ai-auditor-finding-validations-runs",
+    ],
+    ["auto-prover", "/v2/auto-prover-runs"],
+    ["auto-foundry", "/v2/auto-foundry-runs"],
+  ])("uses the dedicated %s launch collection", async (workflow, path) => {
+    const workflowRun = { ...run, run_type: workflowRunType(workflow) };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ request_id: "req-1", run: workflowRun }), {
+        status: 201,
+      }),
+    );
+    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+
+    await api.createRun(
+      workflow,
+      body as RunRequest,
+      `certora-guardian-${workflow}`,
+    );
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      `https://zeus.certora.com${path}`,
+    );
+  });
+
+  it("safely retries an idempotent launch after a retryable failure", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            error: {
-              code: "audit_backend_error",
-              message: "Temporary backend failure",
-            },
+            type: "about:blank",
+            title: "Unavailable",
+            status: 503,
+            detail: "Try again",
+            code: "temporarily_unavailable",
+            request_id: "req-1",
+            retryable: true,
           }),
-          { status: 502 },
+          { status: 503 },
         ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ request_id: "req-2", run }), {
+          status: 201,
+        }),
       );
-      const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
+    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+    const promise = api.createRun(
+      "ai-auditor-full",
+      body,
+      createIdempotencyKey("ai-auditor-full", body, "run-1:attempt-1"),
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
 
-      const request =
-        auditType === "full"
-          ? api.createFullAudit({
-              engine: "ai-auditor",
-              target: "https://github.com/Certora/autoprover-guardian-ci",
-              branch: "b".repeat(40),
-              context: ["contracts/**/*.sol"],
-            })
-          : api.createDiffAudit({
-              target: "https://github.com/Certora/autoprover-guardian-ci",
-              branch_starting: "a".repeat(40),
-              branch_ending: "b".repeat(40),
-              context: ["contracts/**/*.sol"],
-            });
-
-      await expect(request).rejects.toMatchObject({
-        code: "audit_backend_error",
-        statusCode: 502,
-        message: expect.stringContaining(
-          "The launch outcome may be unknown; inspect the audit list before rerunning.",
-        ),
-      } satisfies Partial<ZeusApiError>);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-    },
-  );
-
-  it("warns when a launch transport failure has an ambiguous outcome", async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockRejectedValueOnce(new TypeError("socket closed"));
-    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
-
-    await expect(
-      api.createStandaloneAudit({
-        engine: "auto-prover",
-        target: "https://github.com/Certora/autoprover-guardian-ci",
-        branch: "b".repeat(40),
-        pull_request_number: 42,
-        contract_path: "src/Vault.sol",
-        contract_name: "Vault",
-      }),
-    ).rejects.toMatchObject({
-      name: "ZeusApiAmbiguousLaunchError",
-      message: expect.stringContaining(
-        "The launch outcome may be unknown; inspect the audit list before rerunning.",
-      ),
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(promise).resolves.toMatchObject({ run: { id: run.id } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("warns when a successful launch response cannot be decoded", async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(new Response("{", { status: 200 }));
-    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
-
-    await expect(
-      api.createStandaloneAudit({
-        engine: "auto-foundry",
-        target: "https://github.com/Certora/autoprover-guardian-ci",
-        branch: "b".repeat(40),
-        pull_request_number: 42,
-        contract_path: "src/Vault.sol",
-        contract_name: "Vault",
+  it("uses the canonical run resource and never a progress route", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ request_id: "req-1", run }), {
+        status: 200,
       }),
-    ).rejects.toMatchObject({
-      name: "ZeusApiAmbiguousLaunchError",
-      message: expect.stringContaining(
-        "The launch outcome may be unknown; inspect the audit list before rerunning.",
-      ),
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    );
+    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+
+    await api.getRun(run.id);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      `https://zeus.certora.com/v2/runs/${run.id}`,
+    );
   });
 
-  it.each(["auto-prover", "auto-foundry"] as const)(
-    "creates %s through the unified audits endpoint",
-    async (engine) => {
-      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+  it.each(["reserved", "metering", "releasing", "settled"] as const)(
+    "accepts the canonical %s billing status",
+    async (status) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            job_id: "job-standalone",
-            engine,
-            status: "pending",
+            request_id: "req-1",
+            run: { ...run, billing: { ...run.billing, status } },
           }),
           { status: 200 },
         ),
       );
-      const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
+      const api = new ZeusApi("https://app.certora.com", "certora_test");
 
-      await api.createStandaloneAudit({
-        engine,
-        target: "https://github.com/Certora/autoprover-guardian-ci",
-        branch: "b".repeat(40),
-        pull_request_number: 42,
-        contract_path: "src/Vault.sol",
-        contract_name: "Vault",
-        design_doc_path: "docs/design.md",
-        threat_model_path:
-          engine === "auto-prover" ? "docs/threat-model.md" : undefined,
-        token: "ghs_test",
-      });
-
-      expect(fetchMock).toHaveBeenCalledWith(
-        "https://zeus.certora.com/api/v1/audits",
-        expect.objectContaining({ method: "POST" }),
-      );
-      expect(
-        JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string),
-      ).toMatchObject({
-        engine,
-        branch: "b".repeat(40),
-        pull_request_number: 42,
-        contract_path: "src/Vault.sol",
-        contract_name: "Vault",
-        token: "ghs_test",
+      await expect(api.getRun(run.id)).resolves.toMatchObject({
+        run: { billing: { status } },
       });
     },
   );
 
-  it("commits generated files through the authenticated job endpoint", async () => {
-    const response = {
-      commit_sha: "c".repeat(40),
-      commit_created: true,
-      files: [{ path: "certora/Vault.spec" }],
-      renamed_files: [
-        {
-          from: "certora/Vault.spec",
-          to: "certora/Vault.zeus-1.spec",
-        },
-      ],
-    };
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify(response), { status: 200 }),
-      );
-    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
-
-    await expect(
-      api.commitGeneratedFiles("job-1", {
-        pull_request_number: 42,
-        token: "ghs_test",
-      }),
-    ).resolves.toEqual(response);
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      "https://zeus.certora.com/api/v1/audits/job-1/generated-files/commit",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({
-          pull_request_number: 42,
-          token: "ghs_test",
-        }),
-      }),
-    );
-  });
-
-  it.each([
-    {
-      status: 409,
-      code: "generated_files_not_ready",
-      message: "Generated files are still publishing",
-    },
-    {
-      status: 503,
-      code: "audit_backend_unavailable",
-      message: "Temporary backend failure",
-    },
-  ])(
-    "retries the idempotent generated-file commit after $code",
-    async ({ status, code, message }) => {
-      vi.useFakeTimers();
-      const committed = {
-        commit_sha: "c".repeat(40),
-        commit_created: true,
-        files: [{ path: "certora/Vault.spec" }],
-        renamed_files: [],
-      };
-      const fetchMock = vi
-        .spyOn(globalThis, "fetch")
-        .mockResolvedValueOnce(
-          new Response(
-            JSON.stringify({
-              error: { code, message },
-            }),
-            { status },
-          ),
-        )
-        .mockResolvedValueOnce(
-          new Response(JSON.stringify(committed), { status: 200 }),
-        );
-      const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
-
-      const result = api.commitGeneratedFiles("job-1", {
-        pull_request_number: 42,
-        token: "ghs_test",
-      });
-      await vi.advanceTimersByTimeAsync(1000);
-
-      await expect(result).resolves.toEqual(committed);
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-    },
-  );
-
-  it("does not retry a stale generated-file commit request", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          error: {
-            code: "stale_pull_request",
-            message: "The pull request head changed",
-          },
-        }),
-        { status: 409 },
-      ),
-    );
-    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
-
-    await expect(
-      api.commitGeneratedFiles("job-1", {
-        pull_request_number: 42,
-        token: "ghs_test",
-      }),
-    ).rejects.toMatchObject({
-      code: "stale_pull_request",
-      statusCode: 409,
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("returns the cancellation state instead of claiming every request completed", async () => {
-    const pending = {
-      job_id: "job-1",
-      status: "cancellation_pending",
-      message: "Final usage and billing are being reconciled.",
-      requested_at: "2026-07-27T12:00:00.000Z",
-    } as const;
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify(pending), { status: 200 }),
-    );
-    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
-
-    await expect(api.cancelAudit("job-1")).resolves.toEqual(pending);
-  });
-
-  it("bounds a launch request without retrying its ambiguous outcome", async () => {
-    vi.useFakeTimers();
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockImplementation((_url, options) => {
-        return new Promise<Response>((_resolve, reject) => {
-          const signal = options?.signal;
-          signal?.addEventListener(
-            "abort",
-            () => reject(new DOMException("Request timed out", "AbortError")),
-            { once: true },
-          );
-        });
-      });
-    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
-
-    const launch = api.createStandaloneAudit({
-      engine: "auto-prover",
-      target: "https://github.com/Certora/autoprover-guardian-ci",
-      branch: "b".repeat(40),
-      pull_request_number: 42,
-      contract_path: "src/Vault.sol",
-      contract_name: "Vault",
-    });
-    const assertion = expect(launch).rejects.toMatchObject({
-      name: "ZeusApiTimeoutError",
-      message: expect.stringContaining(
-        "The launch outcome may be unknown; inspect the audit list before rerunning.",
-      ),
-    });
-    await vi.advanceTimersByTimeAsync(API_REQUEST_TIMEOUT_MS);
-
-    await assertion;
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not let nested retries exceed a caller's absolute deadline", async () => {
-    vi.useFakeTimers();
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockImplementation((_url, options) => {
-        return new Promise<Response>((_resolve, reject) => {
-          const signal = options?.signal;
-          signal?.addEventListener(
-            "abort",
-            () => reject(new DOMException("Request timed out", "AbortError")),
-            { once: true },
-          );
-        });
-      });
-    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
-
-    const progress = api.getProgress("job-1", Date.now() + 5_000);
-    const assertion =
-      expect(progress).rejects.toBeInstanceOf(ZeusApiDeadlineError);
-    await vi.advanceTimersByTimeAsync(5_000);
-
-    await assertion;
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("reports deadline expiry when the final retry consumes the remaining time", async () => {
-    vi.useFakeTimers();
-    const transientFailure = () =>
-      new Response(
-        JSON.stringify({
-          error: {
-            code: "audit_backend_error",
-            message: "Temporary backend failure",
-          },
-        }),
-        { status: 502 },
-      );
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(transientFailure())
-      .mockResolvedValueOnce(transientFailure())
-      .mockResolvedValueOnce(transientFailure())
-      .mockImplementationOnce((_url, options) => {
-        return new Promise<Response>((_resolve, reject) => {
-          const signal = options?.signal;
-          signal?.addEventListener(
-            "abort",
-            () => reject(new DOMException("Request timed out", "AbortError")),
-            { once: true },
-          );
-        });
-      });
-    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
-
-    const progress = api.getProgress("job-1", Date.now() + 10_000);
-    const assertion =
-      expect(progress).rejects.toBeInstanceOf(ZeusApiDeadlineError);
-    await vi.advanceTimersByTimeAsync(10_000);
-
-    await assertion;
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-  });
-
-  it("retries result_not_ready and returns the result once storage catches up", async () => {
-    vi.useFakeTimers();
-    const result = {
-      job_id: "job-1",
-      status: "succeeded",
-      result: "legacy report",
-      intermediate_result: null,
-    };
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            error: {
-              code: "result_not_ready",
-              message: "Result URL not available yet",
-            },
-          }),
-          { status: 400 },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify(result), { status: 200 }),
-      );
-    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
-
-    const resultPromise = api.getResult("job-1");
-    await vi.advanceTimersByTimeAsync(1000);
-
-    await expect(resultPromise).resolves.toEqual(result);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it("normalizes the API's canceled spelling before the polling loop sees it", async () => {
+  it("rejects pre-v2 billing statuses at runtime", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response(
         JSON.stringify({
-          job_id: "job-1",
-          status: "canceled",
-          current_phase: "cancelled",
-          completed_phases: 1,
-          total_phases: 1,
-          progress: 1,
-          progress_percent: 100,
-          billed_amount_usd: 1,
+          request_id: "req-1",
+          run: { ...run, billing: { ...run.billing, status: "charged" } },
         }),
         { status: 200 },
       ),
     );
-    const api = new ZeusApi("https://zeus.certora.com", "zeus_live_test");
+    const api = new ZeusApi("https://app.certora.com", "certora_test");
 
-    await expect(api.getProgress("job-1")).resolves.toMatchObject({
-      status: "cancelled",
+    await expect(api.getRun(run.id)).rejects.toThrow("malformed run");
+  });
+
+  it("decodes the exact AI Auditor public report envelope", async () => {
+    const report = {
+      format: "json",
+      content: {
+        findings: { highs: [], mediums: [], lows: [], infos: [] },
+      },
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          request_id: "req-1",
+          result: {
+            schema_version: "1",
+            run_id: run.id,
+            run_type: "ai_auditor_full",
+            data: { report, intermediate: null },
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    const api = new ZeusApi("https://app.certora.com", "certora_test");
+
+    await expect(api.getResult(run.id)).resolves.toMatchObject({
+      result: { data: { report } },
     });
   });
 
-  it.each(["insufficient_balance", "insufficient_credits"])(
-    "shows the balance guidance for %s",
-    (code) => {
-      const error = new ZeusApiError(code, "Balance too low", 402);
+  it("decodes the finding-validation result discriminator", async () => {
+    const report = {
+      format: "json",
+      content: { final_verdict: "VALID" },
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          request_id: "req-1",
+          result: {
+            schema_version: "1",
+            run_id: run.id,
+            run_type: "ai_auditor_finding_validation",
+            data: { report },
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    const api = new ZeusApi("https://app.certora.com", "certora_test");
 
-      expect(getZeusApiErrorMessage(error)).toBe(
-        "Insufficient Zeus balance. Please top up at https://zeus.certora.com.",
+    await expect(api.getResult(run.id)).resolves.toMatchObject({
+      result: { run_type: "ai_auditor_finding_validation", data: { report } },
+    });
+  });
+
+  it.each([
+    {
+      name: "result unavailable",
+      mutate: { result: { available: false } },
+      message: "succeeded run without an available result",
+    },
+    {
+      name: "billing unsettled",
+      mutate: {
+        result: { available: true },
+        billing: {
+          status: "metering",
+          reserved_usd: "10.0000",
+          charged_usd: null,
+        },
+      },
+      message: "terminal run with unsettled billing",
+    },
+  ])("rejects a succeeded run with $name", async ({ mutate, message }) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          request_id: "req-1",
+          run: {
+            ...run,
+            status: "succeeded",
+            result: { available: true },
+            billing: {
+              status: "settled",
+              reserved_usd: "10.0000",
+              charged_usd: "1.0000",
+            },
+            ...mutate,
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    const api = new ZeusApi("https://app.certora.com", "certora_test");
+
+    await expect(api.getRun(run.id)).rejects.toThrow(message);
+  });
+
+  it("sends empty POST requests for cancel and generated-file commit", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ request_id: "req-1", run }), {
+          status: 202,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            request_id: "req-2",
+            delivery: {
+              status: "no_changes",
+              commit_sha: null,
+              files: [],
+              renamed_files: [],
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+
+    await api.cancelRun(run.id);
+    await api.commitGeneratedFiles(run.id);
+
+    for (const call of fetchMock.mock.calls) {
+      expect(call[1]).toMatchObject({ method: "POST" });
+      expect(call[1]?.body).toBeUndefined();
+      expect(call[1]?.headers).not.toHaveProperty("Content-Type");
+    }
+  });
+
+  it.each([
+    { status: "committed", commit_sha: null },
+    { status: "no_changes", commit_sha: "c".repeat(40) },
+  ])(
+    "rejects inconsistent generated-file delivery: $status",
+    async (delivery) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            request_id: "req-2",
+            delivery: {
+              ...delivery,
+              files: [],
+              renamed_files: [],
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+      const api = new ZeusApi("https://app.certora.com", "certora_test");
+
+      await expect(api.commitGeneratedFiles(run.id)).rejects.toThrow(
+        "inconsistent generated-file delivery",
       );
     },
   );
 
-  it("keeps invalid-key guidance independent of the workflow secret name", () => {
-    const error = new ZeusApiError("invalid_api_key", "Invalid key", 401);
+  it("surfaces RFC problem details and scope guidance", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          type: "https://zeus.certora.com/problems/missing-scope",
+          title: "Forbidden",
+          status: 403,
+          detail: "runs:create is required",
+          code: "missing_scope",
+          request_id: "req-1",
+          retryable: false,
+        }),
+        { status: 403 },
+      ),
+    );
+    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
 
-    expect(getZeusApiErrorMessage(error)).toBe(
-      "Invalid Zeus API key. Check the API key supplied to this action.",
+    const error = await api.getRun(run.id).catch((caught) => caught);
+    expect(error).toBeInstanceOf(ZeusApiError);
+    expect(error).toMatchObject({
+      code: "missing_scope",
+      statusCode: 403,
+      requestId: "req-1",
+    });
+    expect(getZeusApiErrorMessage(error as ZeusApiError)).toContain(
+      "required by this workflow",
     );
   });
 });

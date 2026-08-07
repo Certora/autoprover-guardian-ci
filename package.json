@@ -1,7 +1,7 @@
 {
-  "name": "autoprover-guardian-ci",
-  "version": "1.0.0",
-  "description": "GitHub Action for AI Auditor, AutoProver, and AutoFoundry pull-request workflows",
+  "name": "zeus-guardian-ci",
+  "version": "2.0.0",
+  "description": "Certora v2 GitHub Action for AI Auditor, AutoProver, and AutoFoundry pull-request workflows",
   "main": "dist/index.js",
   "scripts": {
     "build": "ncc build src/index.ts -o dist --source-map --license licenses.txt",
@@ -23,7 +23,7 @@
     "@actions/github": "^6.0.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@types/node": "^24.13.3",
     "@vercel/ncc": "^0.38.3",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

@@ -1,6 +1,6 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
-import type { ActionConfig, AuditType, Engine, Severity } from "./types";
+import type { ActionConfig, Severity, Workflow } from "./types";
 import {
   CONTRACT_NAME_MAX,
   DEFAULT_MAX_ITERATIONS,
@@ -11,25 +11,28 @@ import {
 } from "./constants";
 
 const VALID_SEVERITIES = new Set<string>(["HIGH", "MEDIUM", "LOW", "INFO"]);
-const VALID_ENGINES = new Set<string>([
-  "ai-auditor",
+const VALID_WORKFLOWS = new Set<string>([
+  "ai-auditor-full",
+  "ai-auditor-diff",
+  "ai-auditor-finding-validation",
   "auto-prover",
   "auto-foundry",
 ]);
 const SOLIDITY_IDENTIFIER_REGEX = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const DOCUMENT_EXTENSIONS = new Set(["md", "markdown", "pdf"]);
 
-function parseSeverities(input: string): Severity[] {
+function parseSeverities(input: string, name: string): Severity[] {
   if (!input.trim()) return [];
   return input
     .split(",")
     .map((s) => s.trim().toUpperCase())
-    .filter((s) => {
+    .map((s) => {
       if (!VALID_SEVERITIES.has(s)) {
-        core.warning(`Ignoring unknown severity: ${s}`);
-        return false;
+        throw new Error(
+          `${name} contains unsupported severity "${s}". Use HIGH, MEDIUM, LOW, or INFO.`,
+        );
       }
-      return true;
+      return s;
     }) as Severity[];
 }
 
@@ -49,14 +52,50 @@ function parsePositiveInteger(input: string, name: string): number {
   return value;
 }
 
-function parseEngine(input: string): Engine {
-  const engine = input || "ai-auditor";
-  if (!VALID_ENGINES.has(engine)) {
+function parseBoolean(
+  input: string,
+  name: string,
+  defaultValue: boolean,
+): boolean {
+  const value = input.trim().toLowerCase();
+  if (!value) return defaultValue;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error(`${name} must be either true or false.`);
+}
+
+function validateApiBaseUrl(input: string): string {
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new Error("api-base-url must be a valid absolute URL.");
+  }
+  if (url.username || url.password || url.search || url.hash) {
     throw new Error(
-      'engine must be "ai-auditor", "auto-prover", or "auto-foundry".',
+      "api-base-url must not contain credentials, a query, or a fragment.",
     );
   }
-  return engine as Engine;
+  const isLoopback =
+    url.hostname === "localhost" ||
+    url.hostname === "127.0.0.1" ||
+    url.hostname === "[::1]";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback)) {
+    throw new Error(
+      "api-base-url must use HTTPS (HTTP is allowed only for local loopback development).",
+    );
+  }
+  return url.href.replace(/\/+$/, "");
+}
+
+function parseWorkflow(input: string): Workflow {
+  const workflow = input || "ai-auditor-diff";
+  if (!VALID_WORKFLOWS.has(workflow)) {
+    throw new Error(
+      'workflow must be "ai-auditor-full", "ai-auditor-diff", "ai-auditor-finding-validation", "auto-prover", or "auto-foundry".',
+    );
+  }
+  return workflow as Workflow;
 }
 
 function validateRepositoryPath(
@@ -67,7 +106,7 @@ function validateRepositoryPath(
   const path = input.trim();
   if (!path) {
     if (required) {
-      throw new Error(`${name} is required for this engine.`);
+      throw new Error(`${name} is required for this workflow.`);
     }
     return undefined;
   }
@@ -112,12 +151,16 @@ function validateDocumentPath(input: string, name: string): string | undefined {
 }
 
 export function getConfig(): ActionConfig {
+  const apiKey = core.getInput("api-key", { required: true });
+  const githubToken = core.getInput("github-token", { required: true });
+  core.setSecret(apiKey);
+  core.setSecret(githubToken);
   const apiConfig = {
-    apiKey: core.getInput("api-key", { required: true }),
-    apiBaseUrl: (
-      core.getInput("api-base-url") || "https://zeus.certora.com"
-    ).replace(/\/+$/, ""),
-    githubToken: core.getInput("github-token", { required: true }),
+    apiKey,
+    apiBaseUrl: validateApiBaseUrl(
+      core.getInput("api-base-url") || "https://app.certora.com",
+    ),
+    githubToken,
   };
   const pr = github.context.payload.pull_request;
   if (!pr) {
@@ -141,9 +184,16 @@ export function getConfig(): ActionConfig {
   }
 
   const { owner, repo } = github.context.repo;
-  const target = `https://github.com/${owner}/${repo}`;
-  const engine = parseEngine(core.getInput("engine"));
-  if (engine === "auto-prover" || engine === "auto-foundry") {
+  const repositoryUrl = `https://github.com/${owner}/${repo}`;
+  const repositoryPrivateValue = github.context.payload.repository?.private;
+  if (typeof repositoryPrivateValue !== "boolean") {
+    throw new Error(
+      "The pull request payload is missing repository visibility.",
+    );
+  }
+  const repositoryPrivate = repositoryPrivateValue;
+  const workflow = parseWorkflow(core.getInput("workflow"));
+  if (workflow === "auto-prover" || workflow === "auto-foundry") {
     const baseRepository = pr.base?.repo?.full_name;
     const headRepository = pr.head?.repo?.full_name;
     if (
@@ -166,14 +216,31 @@ export function getConfig(): ActionConfig {
       core.getInput("timeout") || String(DEFAULT_TIMEOUT),
       "timeout",
     ),
-    commentOnPr: core.getInput("comment-on-pr") !== "false",
-    target,
-    branchStarting: baseSha,
-    branchEnding: headSha,
-    prNumber: pr.number,
+    commentOnPr: parseBoolean(
+      core.getInput("comment-on-pr"),
+      "comment-on-pr",
+      true,
+    ),
+    workflow,
+    repositoryUrl,
+    repositoryPrivate,
+    baseCommitSha: baseSha,
+    headCommitSha: headSha,
+    prNumber: parsePositiveInteger(String(pr.number), "pull request number"),
+    githubRunAttempt: parsePositiveInteger(
+      String(github.context.runAttempt),
+      "GitHub run attempt",
+    ),
+    idempotencySeed: [
+      github.context.runId,
+      github.context.job,
+      workflow,
+      pr.number,
+      headSha,
+    ].join(":"),
   };
 
-  if (engine === "auto-prover" || engine === "auto-foundry") {
+  if (workflow === "auto-prover" || workflow === "auto-foundry") {
     const contractPath = validateRepositoryPath(
       core.getInput("contract-path"),
       "contract-path",
@@ -185,7 +252,7 @@ export function getConfig(): ActionConfig {
 
     const contractName = core.getInput("contract-name").trim();
     if (!contractName) {
-      throw new Error("contract-name is required for this engine.");
+      throw new Error("contract-name is required for this workflow.");
     }
     if (contractName.length > CONTRACT_NAME_MAX) {
       throw new Error(
@@ -204,13 +271,13 @@ export function getConfig(): ActionConfig {
       core.getInput("threat-model-path"),
       "threat-model-path",
     );
-    if (engine === "auto-foundry" && threatModelPath) {
+    if (workflow === "auto-foundry" && threatModelPath) {
       throw new Error("threat-model-path is only supported by auto-prover.");
     }
 
     return {
       ...common,
-      engine,
+      workflow,
       contractPath,
       contractName,
       designDocPath,
@@ -225,6 +292,30 @@ export function getConfig(): ActionConfig {
     throw new Error("At least one context pattern is required.");
   }
 
+  if (workflow === "ai-auditor-finding-validation") {
+    const finding = core.getInput("finding").trim();
+    if (!finding) {
+      throw new Error("finding is required for this workflow.");
+    }
+    if (finding.length > 8_000) {
+      throw new Error("finding must be at most 8000 characters.");
+    }
+    if (finding.includes("\u0000")) {
+      throw new Error("finding must not contain null bytes.");
+    }
+    return {
+      ...common,
+      workflow,
+      context,
+      finding,
+      skipSubmodules: parseBoolean(
+        core.getInput("skip-submodules"),
+        "skip-submodules",
+        false,
+      ),
+    };
+  }
+
   const maxIterations = Number(
     core.getInput("max-iterations") || String(DEFAULT_MAX_ITERATIONS),
   );
@@ -236,52 +327,32 @@ export function getConfig(): ActionConfig {
     throw new Error("max-iterations must be between 4 and 10.");
   }
 
-  const auditTypeInput = core.getInput("audit-type") || "diff";
-  const targetBranchRef: string = pr.base?.ref ?? "";
-  let auditType: AuditType;
-
-  if (auditTypeInput.includes(":")) {
-    // Branch mapping format: "main:full,dev:diff"
-    const mappings = auditTypeInput.split(",").map((m) => m.trim());
-    let resolved: AuditType = "diff"; // default fallback
-    for (const mapping of mappings) {
-      const [branch, type] = mapping.split(":").map((s) => s.trim());
-      if (branch === targetBranchRef && (type === "full" || type === "diff")) {
-        resolved = type;
-        break;
-      }
-    }
-    auditType = resolved;
-    core.info(
-      `Branch "${targetBranchRef}" resolved to audit type: ${auditType}`,
-    );
-  } else if (auditTypeInput === "full" || auditTypeInput === "diff") {
-    auditType = auditTypeInput;
-  } else {
-    throw new Error(
-      'audit-type must be "full", "diff", or a branch mapping like "main:full,dev:diff".',
-    );
-  }
-
   const scopeInput = core.getInput("scope") || "";
   const scope = parseCommaSeparated(scopeInput);
 
   return {
     ...common,
-    engine,
-    auditType,
+    workflow,
     context,
     scope: scope.length > 0 ? scope : undefined,
-    preprompt: core.getInput("preprompt") || undefined,
-    useMemory: core.getInput("use-memory") !== "false",
+    instructions: core.getInput("instructions") || undefined,
+    useMemory: parseBoolean(core.getInput("use-memory"), "use-memory", true),
     maxIterations,
-    skipSubmodules: core.getInput("skip-submodules") === "true",
-    createIssues: core.getInput("create-issues") !== "false",
+    skipSubmodules: parseBoolean(
+      core.getInput("skip-submodules"),
+      "skip-submodules",
+      false,
+    ),
+    createIssues: parseBoolean(
+      core.getInput("create-issues"),
+      "create-issues",
+      true,
+    ),
     issueSeverities: parseSeverities(
       core.getInput("issue-severities") || "HIGH,MEDIUM",
+      "issue-severities",
     ),
-    commentOnPr: core.getInput("comment-on-pr") !== "false",
-    failOn: parseSeverities(core.getInput("fail-on") || ""),
+    failOn: parseSeverities(core.getInput("fail-on") || "", "fail-on"),
     labels: (core.getInput("labels") || "ai-auditor,security")
       .split(",")
       .map((l) => l.trim())

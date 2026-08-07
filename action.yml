@@ -1,5 +1,5 @@
-name: "AutoProver Guardian CI"
-description: "Run AI Auditor, AutoProver, or AutoFoundry on pull requests"
+name: "Certora Guardian CI"
+description: "Run AI Auditor reviews and finding validations, AutoProver, or AutoFoundry on pull requests"
 author: "Certora"
 
 branding:
@@ -8,38 +8,37 @@ branding:
 
 inputs:
   api-key:
-    description: "Zeus API key"
+    description: "Certora organization API key"
     required: true
 
-  engine:
-    description: 'Engine to run: "ai-auditor", "auto-prover", or "auto-foundry"'
+  workflow:
+    description: 'Workflow to run: "ai-auditor-full", "ai-auditor-diff", "ai-auditor-finding-validation", "auto-prover", or "auto-foundry"'
     required: false
-    default: "ai-auditor"
+    default: "ai-auditor-diff"
 
   context:
     description: "AI Auditor only: comma-separated glob patterns for files to analyze"
     required: false
 
+  finding:
+    description: "Finding validation only: finding description to validate (maximum 8000 characters)"
+    required: false
+
   github-token:
-    description: "GitHub token for issues, PR comments, paid launch/validation, and generated-commit verification. Private AI previews and generated writes require the organization GitHub App."
+    description: "GitHub token used locally by the action for issues, PR comments, and generated-commit verification. It is never sent to Certora. Private repository reads and generated writes require the organization GitHub App."
     required: true
     default: "${{ github.token }}"
 
   api-base-url:
-    description: "Zeus API base URL"
+    description: "Certora API base URL"
     required: false
-    default: "https://zeus.certora.com"
-
-  audit-type:
-    description: 'AI Auditor only: "diff", "full", or a per-branch mapping such as "main:full,dev:diff"'
-    required: false
-    default: "diff"
+    default: "https://app.certora.com"
 
   scope:
     description: "AI Auditor only: comma-separated scope patterns for full audits (subset of context to focus on)."
     required: false
 
-  preprompt:
+  instructions:
     description: "AI Auditor only: custom audit instructions"
     required: false
 
@@ -64,7 +63,7 @@ inputs:
     default: "60"
 
   timeout:
-    description: "Maximum minutes to wait for audit completion"
+    description: "Maximum minutes to wait for run completion"
     required: false
     default: "120"
 
@@ -84,7 +83,7 @@ inputs:
     default: "true"
 
   fail-on:
-    description: "AI Auditor only: fail if selected severities exist. Standalone engines use the fixed issues_found outcome policy."
+    description: "AI Auditor only: fail if selected severities exist. Standalone workflows use the fixed issues_found outcome policy."
     required: false
     default: ""
 
@@ -110,11 +109,11 @@ inputs:
     required: false
 
 outputs:
-  job-id:
-    description: "Zeus audit job ID"
+  run-id:
+    description: "Certora run ID"
 
   status:
-    description: "Last known audit status (succeeded, failed, cancelled, or cancellation_pending)"
+    description: "Last known run status (queued, running, finalizing, succeeded, failed, cancelling, or cancelled)"
 
   highs-count:
     description: "AI Auditor HIGH severity finding count"
@@ -131,8 +130,8 @@ outputs:
   issues-created:
     description: "AI Auditor comma-separated list of created issue references (for example, #123)"
 
-  engine:
-    description: "Engine selected for this run"
+  workflow:
+    description: "Workflow selected for this run"
 
   run-outcome:
     description: "AutoProver verification or AutoFoundry test outcome (verified, verified_with_gaps, partial, issues_found, or unknown)"
@@ -143,6 +142,12 @@ outputs:
   generated-commit-sha:
     description: "Commit containing generated files; empty when no commit was needed"
 
+  validation-verdict:
+    description: "Finding validation verdict (VALID or INVALID); empty for other workflows or an unrecognized report"
+
+  validation-severity:
+    description: "Finding validation severity; empty when absent or not applicable"
+
 runs:
-  using: "node20"
+  using: "node24"
   main: "dist/index.js"

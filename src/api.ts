@@ -1,25 +1,27 @@
+import { createHash } from "node:crypto";
 import * as core from "@actions/core";
 import type {
-  AuditResultResponse,
-  CancelAuditResponse,
-  CommitGeneratedFilesRequest,
   CommitGeneratedFilesResponse,
-  CreateAuditResponse,
-  DiffAuditRequest,
-  FullAuditRequest,
-  ApiErrorResponse,
-  ProgressResponse,
-  StandaloneAuditRequest,
-  StatusResponse,
-  AuditStatus,
+  EstimateResponse,
+  ProblemDetails,
+  RunRequest,
+  RunResponse,
+  RunResultResponse,
+  Workflow,
 } from "./types";
-import { API_REQUEST_TIMEOUT_MS, MAX_RETRY_ATTEMPTS } from "./constants";
+import {
+  API_REQUEST_TIMEOUT_MS,
+  MAX_RETRY_ATTEMPTS,
+  SHA_REGEX,
+} from "./constants";
 
 export class ZeusApiError extends Error {
   constructor(
     public code: string,
     message: string,
     public statusCode: number,
+    public retryable: boolean,
+    public requestId?: string,
   ) {
     super(message);
     this.name = "ZeusApiError";
@@ -28,7 +30,7 @@ export class ZeusApiError extends Error {
 
 export class ZeusApiDeadlineError extends Error {
   constructor() {
-    super("The configured audit timeout expired during a Zeus API request.");
+    super("The configured run timeout expired during a Zeus API request.");
     this.name = "ZeusApiDeadlineError";
   }
 }
@@ -36,12 +38,15 @@ export class ZeusApiDeadlineError extends Error {
 export function getZeusApiErrorMessage(error: ZeusApiError): string {
   switch (error.code) {
     case "invalid_api_key":
-      return "Invalid Zeus API key. Check the API key supplied to this action.";
+    case "invalid_bearer_token":
+      return "Invalid Certora API key. Check the api-key supplied to this action.";
     case "insufficient_balance":
-    case "insufficient_credits":
-      return "Insufficient Zeus balance. Please top up at https://zeus.certora.com.";
+      return "Insufficient Certora balance. Please top up at https://app.certora.com.";
+    case "missing_scope":
+    case "insufficient_scope":
+      return "The Certora API key does not have the scope required by this workflow.";
     default:
-      return `Zeus API error (${error.code}): ${error.message}`;
+      return `Certora API error (${error.code}): ${error.message}`;
   }
 }
 
@@ -49,23 +54,331 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const AMBIGUOUS_LAUNCH_GUIDANCE =
-  "The launch outcome may be unknown; inspect the audit list before rerunning.";
-
-function ambiguousLaunchError(error: unknown): Error {
-  const detail = error instanceof Error ? error.message : String(error);
-  const wrapped = new Error(`${detail} ${AMBIGUOUS_LAUNCH_GUIDANCE}`);
-  wrapped.name = "ZeusApiAmbiguousLaunchError";
-  return wrapped;
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  return `{${Object.entries(value as Record<string, unknown>)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+    .join(",")}}`;
 }
 
-type NormalizedAuditStatus = Exclude<AuditStatus, "canceled">;
+/** Stable across action retries and process restarts for an identical launch. */
+export function createIdempotencyKey(
+  workflow: Workflow,
+  body: RunRequest,
+  executionSeed: string,
+): string {
+  const digest = createHash("sha256")
+    .update(executionSeed)
+    .update("\0")
+    .update(workflow)
+    .update("\0")
+    .update(canonicalJson(body))
+    .digest("hex");
+  return `certora-guardian-${digest}`;
+}
 
-/** The public API accepts both spellings; action outputs use `cancelled`. */
-export function normalizeAuditStatus(
-  status: AuditStatus,
-): NormalizedAuditStatus {
-  return status === "canceled" ? "cancelled" : status;
+function retryAfterMs(response: Response): number | null {
+  const value = response.headers.get("Retry-After");
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(value);
+  if (!Number.isFinite(date)) return null;
+  return Math.max(0, date - Date.now());
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function invalidResponse(detail: string): never {
+  const error = new Error(`Invalid Certora API response: ${detail}`);
+  error.name = "ZeusApiResponseError";
+  throw error;
+}
+
+function requestEnvelope(value: unknown): Record<string, unknown> {
+  if (!isRecord(value) || typeof value.request_id !== "string") {
+    invalidResponse("missing request_id");
+  }
+  return value;
+}
+
+function decodeEstimate(value: unknown): EstimateResponse {
+  const envelope = requestEnvelope(value);
+  const estimate = envelope.estimate;
+  if (
+    !isRecord(estimate) ||
+    typeof estimate.estimated_cost_usd !== "string" ||
+    !USD_REGEX.test(estimate.estimated_cost_usd) ||
+    typeof estimate.minimum_balance_required_usd !== "string" ||
+    !USD_REGEX.test(estimate.minimum_balance_required_usd) ||
+    typeof estimate.balance_usd !== "string" ||
+    !SIGNED_USD_REGEX.test(estimate.balance_usd) ||
+    typeof estimate.can_launch !== "boolean"
+  ) {
+    invalidResponse("malformed estimate");
+  }
+  return value as EstimateResponse;
+}
+
+const RUN_TYPES = new Set([
+  "ai_auditor_full",
+  "ai_auditor_diff",
+  "ai_auditor_finding_validation",
+  "auto_prover",
+  "auto_foundry",
+]);
+const RUN_STATUSES = new Set([
+  "queued",
+  "running",
+  "finalizing",
+  "succeeded",
+  "failed",
+  "cancelling",
+  "cancelled",
+]);
+const BILLING_STATUSES = new Set([
+  "reserved",
+  "metering",
+  "releasing",
+  "settled",
+]);
+const DELIVERY_STATUSES = new Set([
+  "pending",
+  "succeeded",
+  "failed",
+  "skipped",
+]);
+const DELIVERY_OUTCOMES = new Set(["committed", "no_changes"]);
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const USD_REGEX = /^\d+\.\d{4}$/;
+const SIGNED_USD_REGEX = /^-?\d+\.\d{4}$/;
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isDeliveryFile(value: unknown): boolean {
+  return isRecord(value) && typeof value.path === "string" && value.path !== "";
+}
+
+function isRenamedFile(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.from === "string" &&
+    value.from !== "" &&
+    typeof value.to === "string" &&
+    value.to !== ""
+  );
+}
+
+function isHttpUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+function decodeRun(value: unknown): RunResponse {
+  const envelope = requestEnvelope(value);
+  const run = envelope.run;
+  if (
+    !isRecord(run) ||
+    typeof run.id !== "string" ||
+    !UUID_REGEX.test(run.id) ||
+    typeof run.run_type !== "string" ||
+    !RUN_TYPES.has(run.run_type) ||
+    typeof run.status !== "string" ||
+    !RUN_STATUSES.has(run.status) ||
+    !isRecord(run.source) ||
+    typeof run.source.repository_url !== "string" ||
+    (run.client_reference !== null &&
+      typeof run.client_reference !== "string") ||
+    !isRecord(run.result) ||
+    typeof run.result.available !== "boolean" ||
+    !isRecord(run.billing) ||
+    typeof run.billing.status !== "string" ||
+    !BILLING_STATUSES.has(run.billing.status) ||
+    typeof run.billing.reserved_usd !== "string" ||
+    !USD_REGEX.test(run.billing.reserved_usd) ||
+    (run.billing.charged_usd !== null &&
+      (typeof run.billing.charged_usd !== "string" ||
+        !USD_REGEX.test(run.billing.charged_usd))) ||
+    (run.failure !== null &&
+      (!isRecord(run.failure) ||
+        typeof run.failure.code !== "string" ||
+        typeof run.failure.detail !== "string" ||
+        typeof run.failure.retryable !== "boolean")) ||
+    (run.delivery !== null &&
+      (!isRecord(run.delivery) ||
+        run.delivery.type !== "github_pull_request" ||
+        !Number.isSafeInteger(run.delivery.pull_request_number) ||
+        (run.delivery.pull_request_number as number) <= 0 ||
+        typeof run.delivery.status !== "string" ||
+        !DELIVERY_STATUSES.has(run.delivery.status) ||
+        (run.delivery.outcome !== null &&
+          (typeof run.delivery.outcome !== "string" ||
+            !DELIVERY_OUTCOMES.has(run.delivery.outcome))) ||
+        (run.delivery.commit_sha !== null &&
+          (typeof run.delivery.commit_sha !== "string" ||
+            !SHA_REGEX.test(run.delivery.commit_sha))) ||
+        !Array.isArray(run.delivery.files) ||
+        !run.delivery.files.every(isDeliveryFile) ||
+        !Array.isArray(run.delivery.renamed_files) ||
+        !run.delivery.renamed_files.every(isRenamedFile) ||
+        !isNullableString(run.delivery.error))) ||
+    typeof run.cancellable !== "boolean" ||
+    typeof run.created_at !== "string" ||
+    !isNullableString(run.started_at) ||
+    !isNullableString(run.completed_at) ||
+    !isHttpUrl(run.dashboard_url)
+  ) {
+    invalidResponse("malformed run");
+  }
+  if (
+    run.progress !== null &&
+    (!isRecord(run.progress) ||
+      typeof run.progress.phase !== "string" ||
+      (run.progress.percent !== null &&
+        (typeof run.progress.percent !== "number" ||
+          !Number.isFinite(run.progress.percent) ||
+          run.progress.percent < 0 ||
+          run.progress.percent > 100)) ||
+      (run.progress.completed_steps !== null &&
+        !isNonNegativeInteger(run.progress.completed_steps)) ||
+      (run.progress.total_steps !== null &&
+        !isNonNegativeInteger(run.progress.total_steps)))
+  ) {
+    invalidResponse("malformed run progress");
+  }
+  if (run.status === "succeeded" && run.result.available !== true) {
+    invalidResponse("succeeded run without an available result");
+  }
+  if (
+    (run.status === "succeeded" ||
+      run.status === "failed" ||
+      run.status === "cancelled") &&
+    run.billing.status !== "settled"
+  ) {
+    invalidResponse("terminal run with unsettled billing");
+  }
+  if (isRecord(run.delivery)) {
+    if (
+      (run.delivery.status === "succeeded" &&
+        (typeof run.delivery.outcome !== "string" ||
+          !DELIVERY_OUTCOMES.has(run.delivery.outcome))) ||
+      (run.delivery.outcome === "committed" &&
+        (typeof run.delivery.commit_sha !== "string" ||
+          !SHA_REGEX.test(run.delivery.commit_sha))) ||
+      (run.delivery.outcome === "no_changes" &&
+        run.delivery.commit_sha !== null)
+    ) {
+      invalidResponse("inconsistent run delivery");
+    }
+  }
+  return value as RunResponse;
+}
+
+function decodeResult(value: unknown): RunResultResponse {
+  const envelope = requestEnvelope(value);
+  const result = envelope.result;
+  if (
+    !isRecord(result) ||
+    result.schema_version !== "1" ||
+    typeof result.run_id !== "string" ||
+    typeof result.run_type !== "string" ||
+    !RUN_TYPES.has(result.run_type) ||
+    !isRecord(result.data)
+  ) {
+    invalidResponse("malformed run result");
+  }
+  if (
+    (result.run_type === "ai_auditor_full" ||
+      result.run_type === "ai_auditor_diff") &&
+    (!isPublicReport(result.data.report) ||
+      (result.data.intermediate !== undefined &&
+        result.data.intermediate !== null &&
+        !isPublicReport(result.data.intermediate)))
+  ) {
+    invalidResponse("malformed AI Auditor report");
+  }
+  if (
+    result.run_type === "ai_auditor_finding_validation" &&
+    !isPublicReport(result.data.report)
+  ) {
+    invalidResponse("malformed finding-validation report");
+  }
+  if (
+    (result.run_type === "auto_prover" || result.run_type === "auto_foundry") &&
+    (!isRecord(result.data.contract) ||
+      typeof result.data.contract.path !== "string" ||
+      typeof result.data.contract.name !== "string" ||
+      !isRecord(result.data.report))
+  ) {
+    invalidResponse("malformed standalone report");
+  }
+  return value as RunResultResponse;
+}
+
+function isPublicReport(value: unknown): boolean {
+  if (!isRecord(value) || !("content" in value)) return false;
+  return (
+    value.format === "json" ||
+    (value.format === "markdown" && typeof value.content === "string")
+  );
+}
+
+function decodeCommit(value: unknown): CommitGeneratedFilesResponse {
+  const envelope = requestEnvelope(value);
+  const delivery = envelope.delivery;
+  if (
+    !isRecord(delivery) ||
+    (delivery.status !== "committed" && delivery.status !== "no_changes") ||
+    (delivery.commit_sha !== null && typeof delivery.commit_sha !== "string") ||
+    !Array.isArray(delivery.files) ||
+    !delivery.files.every(isDeliveryFile) ||
+    !Array.isArray(delivery.renamed_files) ||
+    !delivery.renamed_files.every(isRenamedFile)
+  ) {
+    invalidResponse("malformed generated-file delivery");
+  }
+  if (
+    (delivery.status === "committed" &&
+      (typeof delivery.commit_sha !== "string" ||
+        !SHA_REGEX.test(delivery.commit_sha))) ||
+    (delivery.status === "no_changes" && delivery.commit_sha !== null)
+  ) {
+    invalidResponse("inconsistent generated-file delivery");
+  }
+  return value as CommitGeneratedFilesResponse;
+}
+
+const WORKFLOW_COLLECTIONS: Record<Workflow, string> = {
+  "ai-auditor-full": "/v2/ai-auditor-full-runs",
+  "ai-auditor-diff": "/v2/ai-auditor-diff-runs",
+  "ai-auditor-finding-validation": "/v2/ai-auditor-finding-validations-runs",
+  "auto-prover": "/v2/auto-prover-runs",
+  "auto-foundry": "/v2/auto-foundry-runs",
+};
+
+function workflowCollection(workflow: Workflow): string {
+  return WORKFLOW_COLLECTIONS[workflow];
 }
 
 async function request<T>(
@@ -73,7 +386,6 @@ async function request<T>(
   apiKey: string,
   options: RequestInit = {},
   retries = MAX_RETRY_ATTEMPTS,
-  retryableErrorCodes: readonly string[] = [],
   deadlineMs?: number,
 ): Promise<T> {
   let lastError: Error | null = null;
@@ -83,87 +395,71 @@ async function request<T>(
       deadlineMs === undefined
         ? API_REQUEST_TIMEOUT_MS
         : deadlineMs - Date.now();
-    if (remainingMs <= 0) {
-      throw new ZeusApiDeadlineError();
-    }
-    const requestTimeoutMs = Math.min(API_REQUEST_TIMEOUT_MS, remainingMs);
+    if (remainingMs <= 0) throw new ZeusApiDeadlineError();
+
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+    const timeout = setTimeout(
+      () => controller.abort(),
+      Math.min(API_REQUEST_TIMEOUT_MS, remainingMs),
+    );
+    let serverRetryAfterMs: number | null = null;
+
     try {
+      const hasBody = options.body !== undefined;
       const response = await fetch(url, {
         ...options,
         signal: controller.signal,
+        redirect: "error",
         headers: {
-          "X-API-Key": apiKey,
-          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          Accept: "application/json",
+          ...(hasBody ? { "Content-Type": "application/json" } : {}),
           ...options.headers,
         },
       });
 
-      if (response.ok) {
-        return (await response.json()) as T;
-      }
+      if (response.ok) return (await response.json()) as T;
 
-      // Parse error response
-      let errorBody: ApiErrorResponse | null = null;
+      let problem: ProblemDetails | null = null;
       try {
-        errorBody = (await response.json()) as ApiErrorResponse;
+        const candidate: unknown = await response.json();
+        if (
+          isRecord(candidate) &&
+          typeof candidate.code === "string" &&
+          typeof candidate.detail === "string" &&
+          typeof candidate.status === "number" &&
+          (candidate.retryable === undefined ||
+            typeof candidate.retryable === "boolean") &&
+          (candidate.request_id === undefined ||
+            typeof candidate.request_id === "string")
+        ) {
+          problem = candidate as ProblemDetails;
+        }
       } catch {
-        // Ignore JSON parse failure
+        // Preserve the HTTP status if the upstream response is malformed.
       }
 
-      const code = errorBody?.error?.code ?? "unknown_error";
-      const message =
-        errorBody?.error?.message ??
-        `HTTP ${response.status}: ${response.statusText}`;
-
-      const shouldRetry =
-        response.status === 429 ||
-        response.status >= 500 ||
-        retryableErrorCodes.includes(code);
-
-      if (!shouldRetry) {
-        throw new ZeusApiError(code, message, response.status);
-      }
-
-      lastError =
-        options.method === "POST" && retries === 0 && response.status >= 500
-          ? new ZeusApiError(
-              code,
-              `${message} ${AMBIGUOUS_LAUNCH_GUIDANCE}`,
-              response.status,
-            )
-          : new ZeusApiError(code, message, response.status);
+      const error = new ZeusApiError(
+        problem?.code ?? "unknown_error",
+        problem?.detail ?? `HTTP ${response.status}: ${response.statusText}`,
+        response.status,
+        problem?.retryable ??
+          (response.status === 429 || response.status >= 500),
+        problem?.request_id,
+      );
+      if (!error.retryable) throw error;
+      lastError = error;
+      serverRetryAfterMs = retryAfterMs(response);
     } catch (error) {
-      if (
-        error instanceof ZeusApiError &&
-        error.statusCode < 500 &&
-        error.statusCode !== 429
-      ) {
-        throw error;
-      }
+      if (error instanceof ZeusApiError && !error.retryable) throw error;
       if (error instanceof Error && error.name === "AbortError") {
-        if (deadlineMs !== undefined && deadlineMs - Date.now() <= 0) {
+        if (deadlineMs !== undefined && deadlineMs <= Date.now()) {
           throw new ZeusApiDeadlineError();
         }
-        const timeoutSeconds = Math.ceil(requestTimeoutMs / 1000);
-        const ambiguousLaunch =
-          options.method === "POST" && retries === 0
-            ? ` ${AMBIGUOUS_LAUNCH_GUIDANCE}`
-            : "";
-        lastError = new Error(
-          `Zeus API request timed out after ${timeoutSeconds} seconds.${ambiguousLaunch}`,
-        );
+        lastError = new Error("Certora API request timed out.");
         lastError.name = "ZeusApiTimeoutError";
       } else {
-        lastError =
-          options.method === "POST" &&
-          retries === 0 &&
-          !(error instanceof ZeusApiError)
-            ? ambiguousLaunchError(error)
-            : error instanceof Error
-              ? error
-              : new Error(String(error));
+        lastError = error instanceof Error ? error : new Error(String(error));
       }
     } finally {
       clearTimeout(timeout);
@@ -174,10 +470,12 @@ async function request<T>(
         deadlineMs === undefined
           ? Number.POSITIVE_INFINITY
           : deadlineMs - Date.now();
-      if (remainingBeforeRetry <= 0) {
-        throw new ZeusApiDeadlineError();
-      }
-      const delay = Math.min(1000 * 2 ** attempt, 30000, remainingBeforeRetry);
+      if (remainingBeforeRetry <= 0) throw new ZeusApiDeadlineError();
+      const delay = Math.min(
+        serverRetryAfterMs ?? 1000 * 2 ** attempt,
+        30_000,
+        remainingBeforeRetry,
+      );
       core.info(
         `Request failed, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${retries})...`,
       );
@@ -194,107 +492,86 @@ export class ZeusApi {
     private apiKey: string,
   ) {}
 
-  async createFullAudit(body: FullAuditRequest): Promise<CreateAuditResponse> {
-    return request<CreateAuditResponse>(
-      `${this.baseUrl}/api/v1/audits`,
-      this.apiKey,
-      {
-        method: "POST",
-        body: JSON.stringify(body),
-      },
-      0,
+  async estimateRun(
+    workflow: Workflow,
+    body: RunRequest,
+  ): Promise<EstimateResponse> {
+    return decodeEstimate(
+      await request<unknown>(
+        `${this.baseUrl}${workflowCollection(workflow)}/estimate`,
+        this.apiKey,
+        { method: "POST", body: JSON.stringify(body) },
+      ),
     );
   }
 
-  async createDiffAudit(body: DiffAuditRequest): Promise<CreateAuditResponse> {
-    return request<CreateAuditResponse>(
-      `${this.baseUrl}/api/v1/diff-audits`,
-      this.apiKey,
-      {
-        method: "POST",
-        body: JSON.stringify(body),
-      },
-      0,
+  async createRun(
+    workflow: Workflow,
+    body: RunRequest,
+    idempotencyKey: string,
+  ): Promise<RunResponse> {
+    return decodeRun(
+      await request<unknown>(
+        `${this.baseUrl}${workflowCollection(workflow)}`,
+        this.apiKey,
+        {
+          method: "POST",
+          body: JSON.stringify(body),
+          headers: { "Idempotency-Key": idempotencyKey },
+        },
+      ),
     );
   }
 
-  async createStandaloneAudit(
-    body: StandaloneAuditRequest,
-  ): Promise<CreateAuditResponse> {
-    return request<CreateAuditResponse>(
-      `${this.baseUrl}/api/v1/audits`,
-      this.apiKey,
-      {
-        method: "POST",
-        body: JSON.stringify(body),
-      },
-      0,
+  async getRun(runId: string, deadlineMs?: number): Promise<RunResponse> {
+    return decodeRun(
+      await request<unknown>(
+        `${this.baseUrl}/v2/runs/${runId}`,
+        this.apiKey,
+        {},
+        MAX_RETRY_ATTEMPTS,
+        deadlineMs,
+      ),
     );
-  }
-
-  async getStatus(jobId: string, deadlineMs?: number): Promise<StatusResponse> {
-    const response = await request<StatusResponse>(
-      `${this.baseUrl}/api/v1/audits/${jobId}`,
-      this.apiKey,
-      {},
-      MAX_RETRY_ATTEMPTS,
-      [],
-      deadlineMs,
-    );
-    return { ...response, status: normalizeAuditStatus(response.status) };
-  }
-
-  async getProgress(
-    jobId: string,
-    deadlineMs?: number,
-  ): Promise<ProgressResponse> {
-    const response = await request<ProgressResponse>(
-      `${this.baseUrl}/api/v1/audits/${jobId}/progress`,
-      this.apiKey,
-      {},
-      MAX_RETRY_ATTEMPTS,
-      [],
-      deadlineMs,
-    );
-    return { ...response, status: normalizeAuditStatus(response.status) };
   }
 
   async getResult(
-    jobId: string,
+    runId: string,
     deadlineMs?: number,
-  ): Promise<AuditResultResponse> {
-    return request<AuditResultResponse>(
-      `${this.baseUrl}/api/v1/audits/${jobId}/result`,
-      this.apiKey,
-      {},
-      MAX_RETRY_ATTEMPTS,
-      ["result_not_ready"],
-      deadlineMs,
+  ): Promise<RunResultResponse> {
+    return decodeResult(
+      await request<unknown>(
+        `${this.baseUrl}/v2/runs/${runId}/result`,
+        this.apiKey,
+        {},
+        MAX_RETRY_ATTEMPTS,
+        deadlineMs,
+      ),
     );
   }
 
-  async cancelAudit(jobId: string): Promise<CancelAuditResponse> {
-    return request<CancelAuditResponse>(
-      `${this.baseUrl}/api/v1/audits/${jobId}`,
-      this.apiKey,
-      { method: "DELETE" },
-      0, // No retries for cancel: the accepted response may be lost.
+  async cancelRun(runId: string, deadlineMs?: number): Promise<RunResponse> {
+    return decodeRun(
+      await request<unknown>(
+        `${this.baseUrl}/v2/runs/${runId}/cancel`,
+        this.apiKey,
+        { method: "POST" },
+        MAX_RETRY_ATTEMPTS,
+        deadlineMs,
+      ),
     );
   }
 
   async commitGeneratedFiles(
-    jobId: string,
-    body: CommitGeneratedFilesRequest,
+    runId: string,
   ): Promise<CommitGeneratedFilesResponse> {
-    return request<CommitGeneratedFilesResponse>(
-      `${this.baseUrl}/api/v1/audits/${jobId}/generated-files/commit`,
-      this.apiKey,
-      {
-        method: "POST",
-        body: JSON.stringify(body),
-      },
-      MAX_RETRY_ATTEMPTS,
-      ["generated_files_not_ready"],
+    return decodeCommit(
+      await request<unknown>(
+        `${this.baseUrl}/v2/runs/${runId}/generated-files/commit`,
+        this.apiKey,
+        { method: "POST" },
+        MAX_RETRY_ATTEMPTS,
+      ),
     );
   }
 }

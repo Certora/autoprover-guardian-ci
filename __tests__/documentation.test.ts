@@ -1,92 +1,60 @@
 import { readFileSync } from "node:fs";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-const root = path.resolve(__dirname, "..");
-const read = (file: string) => readFileSync(path.join(root, file), "utf8");
+const readme = readFileSync("README.md", "utf8");
+const action = readFileSync("action.yml", "utf8");
 
-function manifestKeys(manifest: string, section: "inputs" | "outputs") {
-  const nextSection = section === "inputs" ? "outputs" : "runs";
-  const body = manifest.match(
-    new RegExp(`^${section}:\\n([\\s\\S]*?)(?=^${nextSection}:)`, "m"),
-  )?.[1];
-  if (!body) throw new Error(`Missing ${section} section in action.yml`);
-
-  return [...body.matchAll(/^  ([a-z][a-z0-9-]*):$/gm)].map(
-    (match) => match[1],
-  );
-}
-
-describe("published usage documentation", () => {
-  it("uses the release channel that supports all documented engines", () => {
-    const readme = read("README.md");
-    const manifest = read("action.yml");
-    const packageJson = JSON.parse(read("package.json")) as { name: string };
-
-    expect(packageJson.name).toBe("autoprover-guardian-ci");
-    expect(readme).toContain("# AutoProver Guardian CI");
-    expect(manifest).toContain('name: "AutoProver Guardian CI"');
-    expect(readme).toContain("Certora/autoprover-guardian-ci@main");
-    expect(readme).not.toContain("Certora/zeus-guardian-ci@");
-    expect(readme).toContain("AI Auditor");
-    expect(readme).toContain("AutoProver");
-    expect(readme).toContain("AutoFoundry");
-  });
-
-  it("matches generated workflow secrets and action defaults", () => {
-    const readme = read("README.md");
-    const manifest = read("action.yml");
-
-    expect(readme).toContain("`AUTOPROVER_API_KEY` secret");
-    expect(readme).not.toContain("AI_AUDITOR_API_KEY");
-    expect(readme).not.toContain("ZEUS_API_KEY");
-    expect(readme).toContain("`ai-auditor,security`");
-    expect(manifest).toContain('default: "ai-auditor,security"');
-    expect(readme).toContain("[AI Auditor] HIGH:");
-    expect(readme).toContain("Legacy `[Auto Prover]` titles remain recognized");
-  });
-
-  it("documents launch retry and asynchronous cancellation semantics", () => {
-    const readme = read("README.md");
-    const manifest = read("action.yml");
-
-    expect(readme).toMatch(
-      /launch endpoints\s+do not\s+currently accept an idempotency key/,
-    );
-    expect(readme).toMatch(/a\s+confirmed `cancelled` run/);
-    expect(readme).toContain("`cancellation_pending`");
-    expect(manifest).toContain("cancellation_pending");
-  });
-
-  it("lists every action input and output in the README", () => {
-    const readme = read("README.md");
-    const manifest = read("action.yml");
-
-    for (const input of manifestKeys(manifest, "inputs")) {
-      expect(readme).toContain(`| \`${input}\``);
+describe("published v2 documentation", () => {
+  it("documents the five supported workflows and v2 release", () => {
+    for (const workflow of [
+      "ai-auditor-full",
+      "ai-auditor-diff",
+      "ai-auditor-finding-validation",
+      "auto-prover",
+      "auto-foundry",
+    ]) {
+      expect(readme).toContain(`\`${workflow}\``);
+      expect(action).toContain(workflow);
     }
-    for (const output of manifestKeys(manifest, "outputs")) {
-      expect(readme).toContain(`| \`${output}\``);
-    }
+    expect(readme).toContain("Certora/zeus-guardian-ci@v2");
+    expect(readme).toContain("`finding`");
+    expect(readme).toContain("`validation-verdict`");
   });
 
-  it("scopes standalone documents and AI-only finding outputs accurately", () => {
-    const readme = read("README.md");
-    const manifest = read("action.yml");
+  it("documents Bearer v2 behavior and no progress endpoint", () => {
+    expect(readme).toContain("public `/v2` run API");
+    expect(readme).toContain("There is no separate\nprogress endpoint");
+    expect(readme).toContain("`Idempotency-Key`");
+    expect(readme).toContain("polls `GET /v2/runs/{run_id}`");
+    expect(readme).not.toContain("/api/v1");
+    expect(readme).not.toContain("X-API-Key");
+    expect(readme).toContain("https://app.certora.com");
+    expect(action).toContain('default: "https://app.certora.com"');
+    expect(action).toContain('using: "node24"');
+  });
 
-    expect(readme).toContain(
-      "repository-relative `.md`, `.markdown`, or `.pdf` files",
-    );
-    expect(manifest).toContain(
-      "optional repository-relative .md, .markdown, or .pdf design document",
-    );
-    expect(manifest).toContain("AI Auditor HIGH severity finding count");
-    expect(manifest).toContain("AI Auditor INFO severity finding count");
-    expect(manifest).toContain(
-      "AutoProver verification or AutoFoundry test outcome",
-    );
-    expect(readme).toMatch(
-      /AutoFoundry comments instead show\s+generated test counts/,
-    );
+  it("states that GitHub credentials stay local", () => {
+    expect(readme).toContain("It is never sent to Certora");
+    expect(action).toContain("It is never sent to Certora");
+    expect(readme).toContain("organization_github_app");
+  });
+
+  it("documents run terminology, commit binding, and the exact trailer", () => {
+    expect(readme).toContain("`run-id`");
+    expect(action).toContain("run-id:");
+    expect(readme).toContain("Certora-Guardian-Run: <UUID>");
+    expect(readme).toContain("Zeus-Guardian-Job: <UUID>");
+    expect(readme).toContain("empty-body");
+  });
+
+  it("lists every action input and output", () => {
+    const inputsBlock = action.split("inputs:")[1]?.split("outputs:")[0] ?? "";
+    const outputsBlock = action.split("outputs:")[1]?.split("runs:")[0] ?? "";
+    const keys = (block: string) =>
+      [...block.matchAll(/^  ([a-z][a-z0-9-]*):$/gm)].map((match) => match[1]);
+    for (const input of keys(inputsBlock))
+      expect(readme).toContain(`\`${input}\``);
+    for (const output of keys(outputsBlock))
+      expect(readme).toContain(`\`${output}\``);
   });
 });

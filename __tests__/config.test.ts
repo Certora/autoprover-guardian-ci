@@ -1,261 +1,213 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { getInputMock, githubContextMock, inputs } = vi.hoisted(() => ({
-  getInputMock: vi.fn(),
-  githubContextMock: {
-    payload: {
-      pull_request: {
-        base: {
-          ref: "main",
-          sha: "a".repeat(40),
-          repo: {
-            full_name: "Certora/autoprover-guardian-ci",
+const { getInputMock, githubContextMock, inputs, setSecretMock } = vi.hoisted(
+  () => ({
+    getInputMock: vi.fn(),
+    setSecretMock: vi.fn(),
+    githubContextMock: {
+      payload: {
+        repository: { private: false },
+        pull_request: {
+          base: {
+            sha: "a".repeat(40),
+            repo: { full_name: "Certora/zeus-guardian-ci" },
           },
-        },
-        head: {
-          ref: "feature/vault",
-          sha: "b".repeat(40),
-          repo: {
-            full_name: "Certora/autoprover-guardian-ci",
+          head: {
+            sha: "b".repeat(40),
+            repo: { full_name: "Certora/zeus-guardian-ci" },
           },
+          number: 42,
         },
-        number: 42,
       },
+      repo: { owner: "Certora", repo: "zeus-guardian-ci" },
+      runId: 123,
+      runAttempt: 2,
+      job: "certora",
     },
-    repo: {
-      owner: "Certora",
-      repo: "autoprover-guardian-ci",
-    },
-  },
-  inputs: new Map<string, string>(),
-}));
+    inputs: new Map<string, string>(),
+  }),
+);
 
 vi.mock("@actions/core", () => ({
   getInput: getInputMock,
+  setSecret: setSecretMock,
   warning: vi.fn(),
   info: vi.fn(),
 }));
-
-vi.mock("@actions/github", () => ({
-  context: githubContextMock,
-}));
+vi.mock("@actions/github", () => ({ context: githubContextMock }));
 
 import { getConfig } from "../src/config";
 
-function setRequiredInputs() {
-  inputs.set("api-key", "zeus_live_test");
-  inputs.set("context", "contracts/**/*.sol");
-  inputs.set("github-token", "ghs_test");
-}
-
-describe("getConfig", () => {
+describe("getConfig v2", () => {
   beforeEach(() => {
     inputs.clear();
-    setRequiredInputs();
+    inputs.set("api-key", "certora_test");
+    inputs.set("github-token", "ghs_test");
+    inputs.set("context", "contracts/**/*.sol");
+    githubContextMock.payload.repository.private = false;
     githubContextMock.payload.pull_request.head.repo.full_name =
-      "Certora/autoprover-guardian-ci";
+      "Certora/zeus-guardian-ci";
+    githubContextMock.runAttempt = 2;
     getInputMock.mockImplementation(
       (name: string, options?: { required?: boolean }) => {
         const value = inputs.get(name) ?? "";
-        if (options?.required && !value) {
-          throw new Error(`Input required and not supplied: ${name}`);
-        }
+        if (options?.required && !value) throw new Error(`${name} is required`);
         return value;
       },
     );
   });
 
-  it("enables repo memory by default", () => {
-    expect(getConfig().useMemory).toBe(true);
-  });
-
-  it("defaults to AI Auditor and requires context for that engine", () => {
-    const config = getConfig();
-
-    expect(config).toMatchObject({
-      engine: "ai-auditor",
-      auditType: "diff",
+  it("defaults to the ai-auditor-diff workflow", () => {
+    expect(getConfig()).toMatchObject({
+      workflow: "ai-auditor-diff",
+      apiBaseUrl: "https://app.certora.com",
+      repositoryUrl: "https://github.com/Certora/zeus-guardian-ci",
+      repositoryPrivate: false,
+      baseCommitSha: "a".repeat(40),
+      headCommitSha: "b".repeat(40),
+      githubRunAttempt: 2,
+      idempotencySeed: expect.stringContaining("123:certora"),
       context: ["contracts/**/*.sol"],
-      labels: ["ai-auditor", "security"],
+      useMemory: true,
     });
-
-    inputs.delete("context");
-    expect(() => getConfig()).toThrow(
-      "At least one context pattern is required.",
-    );
+    expect(setSecretMock).toHaveBeenCalledWith("certora_test");
+    expect(setSecretMock).toHaveBeenCalledWith("ghs_test");
   });
 
-  it("disables repo memory when use-memory is false", () => {
+  it("keeps the idempotency seed stable across GitHub rerun attempts", () => {
+    const firstAttemptSeed = getConfig().idempotencySeed;
+    githubContextMock.runAttempt = 3;
+
+    expect(getConfig()).toMatchObject({
+      githubRunAttempt: 3,
+      idempotencySeed: firstAttemptSeed,
+    });
+  });
+
+  it("accepts both explicit AI Auditor workflows and custom instructions", () => {
+    inputs.set("workflow", "ai-auditor-full");
+    inputs.set("instructions", "Focus on authorization.");
+    inputs.set("scope", "contracts/src/**,contracts/lib/**");
     inputs.set("use-memory", "false");
-
-    expect(getConfig().useMemory).toBe(false);
-  });
-
-  it("defaults to the production Certora Zeus URL", () => {
-    expect(getConfig().apiBaseUrl).toBe("https://zeus.certora.com");
-  });
-
-  it.each([
-    ["poll-interval", "1.5"],
-    ["poll-interval", "60seconds"],
-    ["timeout", "1.5"],
-  ])("rejects a non-integer %s value of %s", (name, value) => {
-    inputs.set(name, value);
-
-    expect(() => getConfig()).toThrow(`${name} must be a positive integer.`);
-  });
-
-  it("rejects a partially numeric max-iterations value", () => {
-    inputs.set("max-iterations", "6rounds");
-
-    expect(() => getConfig()).toThrow(
-      "max-iterations must be between 4 and 10.",
-    );
-  });
-
-  it("parses AutoProver contract and document inputs without AI Auditor context", () => {
-    inputs.set("engine", "auto-prover");
-    inputs.delete("context");
-    inputs.set("contract-path", "src/Vault.sol");
-    inputs.set("contract-name", "Vault");
-    inputs.set("design-doc-path", "docs/design.md");
-    inputs.set("threat-model-path", "docs/threat-model.md");
-
     expect(getConfig()).toMatchObject({
-      engine: "auto-prover",
-      contractPath: "src/Vault.sol",
-      contractName: "Vault",
-      designDocPath: "docs/design.md",
-      threatModelPath: "docs/threat-model.md",
-      branchEnding: "b".repeat(40),
+      workflow: "ai-auditor-full",
+      instructions: "Focus on authorization.",
+      scope: ["contracts/src/**", "contracts/lib/**"],
+      useMemory: false,
     });
   });
 
-  it("parses AutoFoundry without AI Auditor-only inputs", () => {
-    inputs.set("engine", "auto-foundry");
-    inputs.delete("context");
-    inputs.set("audit-type", "invalid-for-ai-auditor");
-    inputs.set("max-iterations", "999");
-    inputs.set("contract-path", "test/Vault.t.sol");
-    inputs.set("contract-name", "VaultTest");
-
-    expect(getConfig()).toMatchObject({
-      engine: "auto-foundry",
-      contractPath: "test/Vault.t.sol",
-      contractName: "VaultTest",
-    });
+  it("records private repository access without forwarding a repository token", () => {
+    githubContextMock.payload.repository.private = true;
+    expect(getConfig()).toMatchObject({ repositoryPrivate: true });
   });
 
-  it.each([
-    ["contract-path", "", "contract-path is required"],
-    ["contract-name", "", "contract-name is required"],
-  ])("requires %s for standalone engines", (name, value, message) => {
-    inputs.set("engine", "auto-prover");
-    inputs.set("contract-path", "src/Vault.sol");
-    inputs.set("contract-name", "Vault");
-    inputs.set(name, value);
-
-    expect(() => getConfig()).toThrow(message);
-  });
-
-  it.each([
-    "../src/Vault.sol",
-    "/src/Vault.sol",
-    "src\\Vault.sol",
-    "src//Vault.sol",
-    "src/.../Vault.sol",
-  ])("rejects unsafe standalone contract path %s", (path) => {
-    inputs.set("engine", "auto-prover");
-    inputs.set("contract-path", path);
-    inputs.set("contract-name", "Vault");
-
-    expect(() => getConfig()).toThrow(
-      "contract-path must be a repository-relative path without traversal.",
-    );
-  });
-
-  it("requires a Solidity file and identifier", () => {
-    inputs.set("engine", "auto-prover");
-    inputs.set("contract-path", "src/Vault.vy");
-    inputs.set("contract-name", "Vault");
-    expect(() => getConfig()).toThrow(
-      "contract-path must point to a .sol file.",
-    );
-
-    inputs.set("contract-path", "src/Vault.sol");
-    inputs.set("contract-name", "Vault.sol");
-    expect(() => getConfig()).toThrow(
-      "contract-name must be a valid Solidity identifier.",
-    );
-  });
-
-  it("enforces the API's standalone path and contract-name limits", () => {
-    inputs.set("engine", "auto-prover");
-    inputs.set("contract-path", `${"a".repeat(501)}.sol`);
-    inputs.set("contract-name", "Vault");
-    expect(() => getConfig()).toThrow(
-      "contract-path must be at most 500 characters.",
-    );
-
-    inputs.set("contract-path", "src/Vault.sol");
-    inputs.set("contract-name", "V".repeat(201));
-    expect(() => getConfig()).toThrow(
-      "contract-name must be at most 200 characters.",
-    );
-  });
-
-  it("rejects control characters in standalone repository paths", () => {
-    inputs.set("engine", "auto-prover");
-    inputs.set("contract-path", "src/\nVault.sol");
-    inputs.set("contract-name", "Vault");
-
-    expect(() => getConfig()).toThrow(
-      "contract-path must be a repository-relative path without traversal.",
-    );
-  });
-
-  it.each(["docs/design.txt", "docs/design", "docs/design.sol"])(
-    "rejects unsupported design document %s",
-    (path) => {
-      inputs.set("engine", "auto-prover");
-      inputs.set("contract-path", "src/Vault.sol");
-      inputs.set("contract-name", "Vault");
-      inputs.set("design-doc-path", path);
-
+  it.each(["ai-auditor-full", "ai-auditor-diff"])(
+    "requires context for %s",
+    (workflow) => {
+      inputs.set("workflow", workflow);
+      inputs.delete("context");
       expect(() => getConfig()).toThrow(
-        "design-doc-path must point to a .md, .markdown, or .pdf file.",
+        "At least one context pattern is required.",
       );
     },
   );
 
-  it("rejects a threat model for AutoFoundry", () => {
-    inputs.set("engine", "auto-foundry");
+  it("parses AutoProver contract and document inputs", () => {
+    inputs.set("workflow", "auto-prover");
+    inputs.delete("context");
     inputs.set("contract-path", "src/Vault.sol");
     inputs.set("contract-name", "Vault");
-    inputs.set("threat-model-path", "docs/threat-model.md");
+    inputs.set("design-doc-path", "docs/design.md");
+    inputs.set("threat-model-path", "docs/threat.pdf");
+    expect(getConfig()).toMatchObject({
+      workflow: "auto-prover",
+      contractPath: "src/Vault.sol",
+      contractName: "Vault",
+      designDocPath: "docs/design.md",
+      threatModelPath: "docs/threat.pdf",
+    });
+  });
 
+  it("parses the finding-validation workflow and required finding", () => {
+    inputs.set("workflow", "ai-auditor-finding-validation");
+    inputs.set("finding", "  Reentrancy in Vault.withdraw()  ");
+    inputs.set("skip-submodules", "true");
+    expect(getConfig()).toMatchObject({
+      workflow: "ai-auditor-finding-validation",
+      context: ["contracts/**/*.sol"],
+      finding: "Reentrancy in Vault.withdraw()",
+      skipSubmodules: true,
+    });
+  });
+
+  it("requires a finding for finding validation", () => {
+    inputs.set("workflow", "ai-auditor-finding-validation");
+    expect(() => getConfig()).toThrow("finding is required");
+  });
+
+  it("rejects invalid workflows", () => {
+    inputs.set("workflow", "finding-validation");
+    expect(() => getConfig()).toThrow("workflow must be");
+  });
+
+  it.each(["../Vault.sol", "/src/Vault.sol", "src\\Vault.sol"])(
+    "rejects unsafe contract path %s",
+    (path) => {
+      inputs.set("workflow", "auto-prover");
+      inputs.set("contract-path", path);
+      inputs.set("contract-name", "Vault");
+      expect(() => getConfig()).toThrow("without traversal");
+    },
+  );
+
+  it("rejects threat models for AutoFoundry", () => {
+    inputs.set("workflow", "auto-foundry");
+    inputs.set("contract-path", "src/Vault.sol");
+    inputs.set("contract-name", "Vault");
+    inputs.set("threat-model-path", "docs/threat.md");
     expect(() => getConfig()).toThrow(
-      "threat-model-path is only supported by auto-prover.",
+      "threat-model-path is only supported by auto-prover",
     );
   });
 
-  it("rejects fork pull requests before launching a standalone engine", () => {
-    inputs.set("engine", "auto-prover");
+  it("rejects fork pull requests for generated-file workflows", () => {
+    inputs.set("workflow", "auto-prover");
     inputs.set("contract-path", "src/Vault.sol");
     inputs.set("contract-name", "Vault");
-    githubContextMock.payload.pull_request.head.repo.full_name =
-      "contributor/autoprover-guardian-ci";
+    githubContextMock.payload.pull_request.head.repo.full_name = "fork/repo";
+    expect(() => getConfig()).toThrow("same-repository pull request");
+  });
 
+  it.each([
+    ["poll-interval", "1.5"],
+    ["timeout", "0"],
+    ["max-iterations", "11"],
+  ])("rejects invalid %s", (name, value) => {
+    inputs.set(name, value);
+    expect(() => getConfig()).toThrow();
+  });
+
+  it("rejects ambiguous boolean inputs", () => {
+    inputs.set("comment-on-pr", "yes");
     expect(() => getConfig()).toThrow(
-      "AutoProver and AutoFoundry require a same-repository pull request",
+      "comment-on-pr must be either true or false",
     );
   });
 
-  it("rejects unknown engines", () => {
-    inputs.set("engine", "all-in-one");
-
+  it("rejects a misspelled fail-on severity instead of weakening policy", () => {
+    inputs.set("fail-on", "HGIH");
     expect(() => getConfig()).toThrow(
-      'engine must be "ai-auditor", "auto-prover", or "auto-foundry".',
+      'fail-on contains unsupported severity "HGIH"',
     );
+  });
+
+  it("requires HTTPS except for loopback development", () => {
+    inputs.set("api-base-url", "http://example.com");
+    expect(() => getConfig()).toThrow("must use HTTPS");
+    inputs.set("api-base-url", "http://127.0.0.1:3000/");
+    expect(getConfig()).toMatchObject({
+      apiBaseUrl: "http://127.0.0.1:3000",
+    });
   });
 });

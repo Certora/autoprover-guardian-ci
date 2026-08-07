@@ -1,210 +1,166 @@
 import { describe, expect, it } from "vitest";
-
 import {
+  formatAiAuditorMarkdownPrComment,
+  formatFindingValidationPrComment,
   formatIssueBody,
   formatIssueTitle,
-  formatLegacyPrComment,
   formatPrComment,
   formatStandalonePrComment,
   getStandaloneWarnings,
   isFailingStandaloneOutcome,
 } from "../src/format";
-import type { AissRunReport, AuditFindings, Finding } from "../src/types";
+import type { AissRunReport, Finding } from "../src/types";
 
-const auditFinding: Finding = {
+const finding: Finding = {
   id: "H-01",
   title: "Unsafe external call",
   severity: "HIGH",
   locations: ["src/Vault.sol:42"],
-  description: "State is updated after the external call.",
-  recommendation: "Update state before making the call.",
+  description: "An external call occurs before state is updated.",
+  recommendation: "Apply checks-effects-interactions.",
 };
 
-const auditFindings: AuditFindings = {
-  highs: [auditFinding],
-  mediums: [],
-  lows: [],
-  infos: [],
+const report: AissRunReport = {
+  schema_version: "1",
+  backend: "prover",
+  contract_name: "Vault",
+  outcome: "verified_with_gaps",
+  rule_counts: [{ status: "VERIFIED", count: 2 }],
+  skipped: [{}],
+  gave_up_components: [],
+  coverage: {
+    total_properties: 3,
+    total_rules: 2,
+    total_groups: 1,
+    property_coverage_complete: false,
+    properties_in_no_group: [],
+    rules_spanning_multiple_groups: [],
+    skipped_count: 1,
+    gave_up_component_count: 0,
+    dropped_orphan_rules: 0,
+    warnings: ["One property was skipped."],
+  },
 };
 
-function report(overrides: Partial<AissRunReport> = {}): AissRunReport {
-  return {
-    contractName: "Vault",
-    outcome: "verified_with_gaps",
-    ruleCounts: [
-      { status: "VERIFIED", count: 3 },
-      { status: "TIMEOUT", count: 1 },
-    ],
-    groupCounts: [],
-    skipped: [{}],
-    gaveUpComponents: [],
-    coverage: {
-      totalProperties: 4,
-      totalRules: 4,
-      totalGroups: 2,
-      propertyCoverageComplete: false,
-      propertiesInNoGroup: [],
-      rulesSpanningMultipleGroups: [],
-      skippedCount: 1,
-      gaveUpComponentCount: 0,
-      droppedOrphanRules: 0,
-      warnings: ["One property lacks a rule mapping."],
-    },
-    ...overrides,
-  };
-}
+const commit = {
+  request_id: "req-1",
+  delivery: {
+    status: "committed" as const,
+    commit_sha: "c".repeat(40),
+    files: [{ path: "certora/Vault.spec" }],
+    renamed_files: [{ from: "certora.conf", to: "certora.generated.conf" }],
+  },
+};
 
 describe("AI Auditor formatting", () => {
-  it("uses AI Auditor branding for issues and pull-request summaries", () => {
-    expect(formatIssueTitle(auditFinding)).toBe(
-      "[AI Auditor] HIGH: Unsafe external call (H-01)",
+  it("uses run terminology for issues and pull-request summaries", () => {
+    expect(formatIssueTitle(finding)).toContain("[AI Auditor] HIGH");
+    expect(formatIssueBody(finding, "run-1", 42)).toContain(
+      "**AI Auditor Run:** `run-1`",
     );
+    expect(
+      formatPrComment(
+        { highs: [finding], mediums: [], lows: [], infos: [] },
+        "run-1",
+        12.5,
+        [],
+        42,
+        "ai-auditor-diff",
+      ),
+    ).toContain("**Run:** `run-1`");
+  });
 
-    const issueBody = formatIssueBody(auditFinding, "job-1", 42);
-    expect(issueBody).toContain("**AI Auditor Job:** `job-1`");
-    expect(issueBody).toContain("created by [AI Auditor]");
-    expect(issueBody).not.toContain("Auto Prover");
+  it("bounds issue titles while preserving the finding ID used for deduplication", () => {
+    const title = formatIssueTitle({ ...finding, title: "X".repeat(1_000) });
+    expect(title.length).toBeLessThanOrEqual(240);
+    expect(title).toContain("(H-01)");
+  });
 
-    const comment = formatPrComment(auditFindings, "job-1", 12.5, [], 42);
-    expect(comment).toContain("AI Auditor Results");
-    expect(comment).toContain("Powered by [AI Auditor]");
-    expect(comment).not.toContain("Auto Prover");
+  it("renders public Markdown reports and bounds comment size", () => {
+    const body = formatAiAuditorMarkdownPrComment({
+      runId: "run-1",
+      cost: 1.25,
+      workflow: "ai-auditor-diff",
+      content: "🔐".repeat(40_000),
+    });
+    expect(body).toContain("<!-- certora-guardian-ci:ai-auditor-diff -->");
+    expect(body).toContain("https://app.certora.com");
+    expect(body).toContain("Output truncated");
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(60_000);
+  });
 
-    const legacy = formatLegacyPrComment("# Legacy report", "job-1", 42);
-    expect(legacy).toContain("AI Auditor Results");
-    expect(legacy).toContain("Powered by [AI Auditor]");
-    expect(legacy).not.toContain("Auto Prover");
+  it("renders a structured finding-validation verdict", () => {
+    const body = formatFindingValidationPrComment({
+      runId: "run-1",
+      cost: 0.5,
+      report: { format: "json", content: {} },
+      parsed: {
+        final_verdict: "INVALID",
+        final_severity: null,
+        severity_reasoning: "",
+        impact: "",
+        likelihood: "",
+        false_positive_reasoning: "The guard is updated before the call.",
+        consensus_method: "unanimous_invalid",
+        analysis_status: "completed",
+        claude_verdict: null,
+        gpt_verdict: null,
+        tiebreaker_verdict: null,
+      },
+    });
+    expect(body).toContain("Likely false positive");
+    expect(body).toContain("The guard is updated before the call.");
+    expect(body).toContain("https://app.certora.com");
   });
 });
 
-describe("standalone engine formatting", () => {
-  it("summarizes rule results, coverage, generated files, and collisions", () => {
-    const comment = formatStandalonePrComment({
-      engine: "auto-prover",
-      jobId: "job-1",
-      cost: 42.5,
-      reportState: "ready",
-      report: report(),
+describe("standalone workflow formatting", () => {
+  it("summarizes normalized v2 reports and generated delivery", () => {
+    const body = formatStandalonePrComment({
+      workflow: "auto-prover",
+      runId: "run-1",
+      cost: 12.5,
+      report,
+      commit,
+    });
+    expect(body).toContain("AutoProver Results — Verified with gaps");
+    expect(body).toContain("`Vault`");
+    expect(body).toContain("certora/Vault.spec");
+    expect(body).toContain("certora.generated.conf");
+    expect(body).toContain("**Run:** `run-1`");
+  });
+
+  it("translates report vocabulary for AutoFoundry", () => {
+    const body = formatStandalonePrComment({
+      workflow: "auto-foundry",
+      runId: "run-1",
+      cost: 1,
+      report: { ...report, outcome: "issues_found" },
       commit: {
-        commit_sha: "c".repeat(40),
-        commit_created: true,
-        files: [
-          { path: "certora/Vault.spec" },
-          { path: "certora/conf/Vault.conf" },
-        ],
-        renamed_files: [
-          {
-            from: "certora/Vault.spec",
-            to: "certora/Vault.zeus-1.spec",
-          },
-        ],
+        request_id: "req-2",
+        delivery: {
+          status: "no_changes",
+          commit_sha: null,
+          files: [],
+          renamed_files: [],
+        },
       },
     });
-
-    expect(comment).toContain("AutoProver Results — Verified with gaps");
-    expect(comment).toContain("| VERIFIED | 3 |");
-    expect(comment).toContain("| TIMEOUT | 1 |");
-    expect(comment).toContain("1 property was skipped.");
-    expect(comment).toContain("`certora/Vault.spec`");
-    expect(comment).toContain(
-      "`certora/Vault.spec` → `certora/Vault.zeus-1.spec`",
-    );
-    expect(comment).toContain("$42.50");
+    expect(body).toContain("AutoFoundry Results — Test failures found");
+    expect(body).toContain("Test objectives");
+    expect(body).toContain("Not needed (head unchanged)");
   });
 
-  it("warns for partial, gap, skipped, and unknown results", () => {
-    expect(
-      getStandaloneWarnings(
-        "ready",
-        report({ outcome: "partial", skipped: [] }),
-      ),
-    ).toContain("The run completed with partial verification coverage.");
-    expect(
-      getStandaloneWarnings("ready", report({ outcome: "verified_with_gaps" })),
-    ).toContain("The run verified its executed rules but has coverage gaps.");
-    expect(
-      getStandaloneWarnings(
-        "ready",
-        report({ outcome: "verified_with_gaps" }),
-        "auto-foundry",
-      ),
-    ).toEqual(
+  it("reports coverage gaps and fails only issues_found", () => {
+    expect(getStandaloneWarnings(report, "auto-prover")).toEqual(
       expect.arrayContaining([
-        "The executed Foundry tests passed, but test coverage has gaps.",
-        "1 test objective was skipped.",
-        "One test objective lacks a test mapping.",
+        "The run verified its executed rules but has coverage gaps.",
+        "1 property was skipped.",
+        "Property coverage is incomplete.",
       ]),
     );
-    expect(
-      getStandaloneWarnings(
-        "unavailable",
-        report({ outcome: "unknown", skipped: [] }),
-      ),
-    ).toEqual(
-      expect.arrayContaining([
-        "The structured report state is unavailable.",
-        "The run outcome could not be determined.",
-      ]),
-    );
-  });
-
-  it("fails only the issues_found report outcome", () => {
     expect(isFailingStandaloneOutcome("issues_found")).toBe(true);
-    expect(isFailingStandaloneOutcome("verified")).toBe(false);
-    expect(isFailingStandaloneOutcome("verified_with_gaps")).toBe(false);
     expect(isFailingStandaloneOutcome("partial")).toBe(false);
     expect(isFailingStandaloneOutcome("unknown")).toBe(false);
-  });
-
-  it("describes structured AutoFoundry output as generated tests", () => {
-    const comment = formatStandalonePrComment({
-      engine: "auto-foundry",
-      jobId: "job-2",
-      cost: 8.75,
-      reportState: "ready",
-      report: report(),
-      commit: {
-        commit_sha: "d".repeat(40),
-        commit_created: true,
-        files: [{ path: "test/generated/Vault.t.sol" }],
-        renamed_files: [],
-      },
-    });
-
-    expect(comment).toContain("AutoFoundry Results — Tests passed with gaps");
-    expect(comment).toContain("| Test objectives | 4 |");
-    expect(comment).toContain("| Generated tests | 4 |");
-    expect(comment).toContain("### Test results");
-    expect(comment).toContain("| PASSED | 3 |");
-    expect(comment).toContain("### Test coverage warnings");
-    expect(comment).toContain("1 test objective was skipped.");
-    expect(comment).not.toMatch(
-      /\b(?:properties|property|rules|rule|verification|verified)\b/i,
-    );
-  });
-
-  it("formats AutoFoundry and a missing report without throwing", () => {
-    const comment = formatStandalonePrComment({
-      engine: "auto-foundry",
-      jobId: "job-2",
-      cost: 0,
-      reportState: "not_published",
-      report: null,
-      commit: {
-        commit_sha: "d".repeat(40),
-        commit_created: false,
-        files: [],
-        renamed_files: [],
-      },
-    });
-
-    expect(comment).toContain("AutoFoundry Results — Unknown");
-    expect(comment).toContain(
-      "No structured Foundry test report was available.",
-    );
-    expect(comment).toContain("| Test objectives | Unavailable |");
-    expect(comment).toContain("| Generated tests | Unavailable |");
-    expect(comment).toContain("Not needed (head unchanged)");
-    expect(comment).toContain("**Generated commit:** None");
   });
 });
