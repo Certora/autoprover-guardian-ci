@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createIdempotencyKey,
-  getZeusApiErrorMessage,
-  ZeusApi,
-  ZeusApiError,
+  getAutoProverApiErrorMessage,
+  AutoProverApi,
+  AutoProverApiError,
 } from "../src/api";
 import type {
   AiAuditorFullRunRequest,
@@ -41,10 +41,10 @@ const run: Run = {
   created_at: "2026-08-07T00:00:00.000Z",
   started_at: null,
   completed_at: null,
-  dashboard_url: "https://zeus.certora.com/runs/1",
+  dashboard_url: "https://app.certora.com/runs/1",
 };
 
-describe("ZeusApi v2", () => {
+describe("AutoProverApi v2", () => {
   beforeEach(() => vi.restoreAllMocks());
   afterEach(() => vi.useRealTimers());
 
@@ -63,12 +63,12 @@ describe("ZeusApi v2", () => {
         { status: 200 },
       ),
     );
-    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
     await api.estimateRun("ai-auditor-full", body);
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://zeus.certora.com/v2/ai-auditor-full-runs/estimate",
+      "https://app.certora.com/v2/ai-auditor-full-runs/estimate",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify(body),
@@ -98,7 +98,7 @@ describe("ZeusApi v2", () => {
         { status: 200 },
       ),
     );
-    const api = new ZeusApi("https://app.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
     await expect(api.estimateRun("ai-auditor-full", body)).resolves.toEqual({
       request_id: "req-1",
@@ -126,7 +126,7 @@ describe("ZeusApi v2", () => {
         { status: 200 },
       ),
     );
-    const api = new ZeusApi("https://app.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
     await expect(api.estimateRun("ai-auditor-full", body)).rejects.toThrow(
       "malformed estimate",
@@ -139,7 +139,7 @@ describe("ZeusApi v2", () => {
         status: 201,
       }),
     );
-    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
     const key = createIdempotencyKey(
       "ai-auditor-full",
       body,
@@ -149,7 +149,7 @@ describe("ZeusApi v2", () => {
     await api.createRun("ai-auditor-full", body, key);
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://zeus.certora.com/v2/ai-auditor-full-runs",
+      "https://app.certora.com/v2/ai-auditor-full-runs",
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({ "Idempotency-Key": key }),
@@ -176,13 +176,13 @@ describe("ZeusApi v2", () => {
         status: 202,
       }),
     );
-    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
     const quoteId = "22222222-2222-4222-8222-222222222222";
 
     await api.createRun("auto-prover", body, "stable-key", quoteId);
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://zeus.certora.com/v2/auto-prover-runs",
+      "https://app.certora.com/v2/auto-prover-runs",
       expect.objectContaining({
         body: JSON.stringify(body),
         headers: expect.objectContaining({
@@ -209,7 +209,7 @@ describe("ZeusApi v2", () => {
         status: 201,
       }),
     );
-    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
     await api.createRun(
       workflow,
@@ -218,7 +218,7 @@ describe("ZeusApi v2", () => {
     );
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      `https://zeus.certora.com${path}`,
+      `https://app.certora.com${path}`,
     );
   });
 
@@ -245,7 +245,7 @@ describe("ZeusApi v2", () => {
           status: 201,
         }),
       );
-    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
     const promise = api.createRun(
       "ai-auditor-full",
       body,
@@ -263,12 +263,12 @@ describe("ZeusApi v2", () => {
         status: 200,
       }),
     );
-    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
     await api.getRun(run.id);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      `https://zeus.certora.com/v2/runs/${run.id}`,
+      `https://app.certora.com/v2/runs/${run.id}`,
     );
   });
 
@@ -284,7 +284,7 @@ describe("ZeusApi v2", () => {
           { status: 200 },
         ),
       );
-      const api = new ZeusApi("https://app.certora.com", "certora_test");
+      const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
       await expect(api.getRun(run.id)).resolves.toMatchObject({
         run: { billing: { status } },
@@ -302,7 +302,7 @@ describe("ZeusApi v2", () => {
         { status: 200 },
       ),
     );
-    const api = new ZeusApi("https://app.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
     await expect(api.getRun(run.id)).rejects.toThrow("malformed run");
   });
@@ -328,7 +328,7 @@ describe("ZeusApi v2", () => {
         { status: 200 },
       ),
     );
-    const api = new ZeusApi("https://app.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
     await expect(api.getResult(run.id)).resolves.toMatchObject({
       result: { data: { report } },
@@ -354,7 +354,7 @@ describe("ZeusApi v2", () => {
         { status: 200 },
       ),
     );
-    const api = new ZeusApi("https://app.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
     await expect(api.getResult(run.id)).resolves.toMatchObject({
       result: { run_type: "ai_auditor_finding_validation", data: { report } },
@@ -399,7 +399,7 @@ describe("ZeusApi v2", () => {
         { status: 200 },
       ),
     );
-    const api = new ZeusApi("https://app.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
     await expect(api.getRun(run.id)).rejects.toThrow(message);
   });
@@ -426,7 +426,7 @@ describe("ZeusApi v2", () => {
           { status: 200 },
         ),
       );
-    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
     await api.cancelRun(run.id);
     await api.commitGeneratedFiles(run.id);
@@ -457,7 +457,7 @@ describe("ZeusApi v2", () => {
           { status: 200 },
         ),
       );
-      const api = new ZeusApi("https://app.certora.com", "certora_test");
+      const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
       await expect(api.commitGeneratedFiles(run.id)).rejects.toThrow(
         "inconsistent generated-file delivery",
@@ -469,7 +469,7 @@ describe("ZeusApi v2", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response(
         JSON.stringify({
-          type: "https://zeus.certora.com/problems/missing-scope",
+          type: "https://app.certora.com/problems/missing-scope",
           title: "Forbidden",
           status: 403,
           detail: "runs:create is required",
@@ -480,16 +480,16 @@ describe("ZeusApi v2", () => {
         { status: 403 },
       ),
     );
-    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
     const error = await api.getRun(run.id).catch((caught) => caught);
-    expect(error).toBeInstanceOf(ZeusApiError);
+    expect(error).toBeInstanceOf(AutoProverApiError);
     expect(error).toMatchObject({
       code: "missing_scope",
       statusCode: 403,
       requestId: "req-1",
     });
-    expect(getZeusApiErrorMessage(error as ZeusApiError)).toContain(
+    expect(getAutoProverApiErrorMessage(error as AutoProverApiError)).toContain(
       "required by this workflow",
     );
   });
@@ -503,7 +503,7 @@ describe("ZeusApi v2", () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            type: `https://zeus.certora.com/problems/${code}`,
+            type: `https://app.certora.com/problems/${code}`,
             title: "Source validation failed",
             status: 422,
             detail: "The requested source input could not be resolved.",
@@ -517,7 +517,7 @@ describe("ZeusApi v2", () => {
           { status: 422 },
         ),
       );
-      const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+      const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
       const error = await api
         .estimateRun("auto-prover", body)
@@ -532,7 +532,7 @@ describe("ZeusApi v2", () => {
           [field]: ["The requested source input could not be resolved."],
         },
       });
-      expect(getZeusApiErrorMessage(error as ZeusApiError)).toContain(guidance);
+      expect(getAutoProverApiErrorMessage(error as AutoProverApiError)).toContain(guidance);
       expect(fetchMock).toHaveBeenCalledTimes(1);
     },
   );

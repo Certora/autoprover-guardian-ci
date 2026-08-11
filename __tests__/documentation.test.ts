@@ -16,7 +16,7 @@ describe("published v2 documentation", () => {
       expect(readme).toContain(`\`${workflow}\``);
       expect(action).toContain(workflow);
     }
-    expect(readme).toContain("Certora/zeus-guardian-ci@v2");
+    expect(readme).toContain("Certora/autoprover-guardian-ci@v2");
     expect(readme).toContain("`finding`");
     expect(readme).toContain("`validation-verdict`");
   });
@@ -49,7 +49,6 @@ describe("published v2 documentation", () => {
     expect(readme).toContain("`run-id`");
     expect(action).toContain("run-id:");
     expect(readme).toContain("Certora-Guardian-Run: <UUID>");
-    expect(readme).toContain("Zeus-Guardian-Job: <UUID>");
     expect(readme).toContain("empty-body");
   });
 

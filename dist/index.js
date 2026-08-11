@@ -29961,13 +29961,13 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ZeusApi = exports.ZeusApiDeadlineError = exports.ZeusApiError = void 0;
-exports.getZeusApiErrorMessage = getZeusApiErrorMessage;
+exports.AutoProverApi = exports.AutoProverApiDeadlineError = exports.AutoProverApiError = void 0;
+exports.getAutoProverApiErrorMessage = getAutoProverApiErrorMessage;
 exports.createIdempotencyKey = createIdempotencyKey;
 const node_crypto_1 = __nccwpck_require__(7598);
 const core = __importStar(__nccwpck_require__(6966));
 const constants_1 = __nccwpck_require__(5851);
-class ZeusApiError extends Error {
+class AutoProverApiError extends Error {
     code;
     statusCode;
     retryable;
@@ -29980,18 +29980,18 @@ class ZeusApiError extends Error {
         this.retryable = retryable;
         this.requestId = requestId;
         this.fieldErrors = fieldErrors;
-        this.name = "ZeusApiError";
+        this.name = "AutoProverApiError";
     }
 }
-exports.ZeusApiError = ZeusApiError;
-class ZeusApiDeadlineError extends Error {
+exports.AutoProverApiError = AutoProverApiError;
+class AutoProverApiDeadlineError extends Error {
     constructor() {
-        super("The configured run timeout expired during a Zeus API request.");
-        this.name = "ZeusApiDeadlineError";
+        super("The configured run timeout expired during an AutoProver API request.");
+        this.name = "AutoProverApiDeadlineError";
     }
 }
-exports.ZeusApiDeadlineError = ZeusApiDeadlineError;
-function getZeusApiErrorMessage(error) {
+exports.AutoProverApiDeadlineError = AutoProverApiDeadlineError;
+function getAutoProverApiErrorMessage(error) {
     switch (error.code) {
         case "invalid_api_key":
         case "invalid_bearer_token":
@@ -30053,7 +30053,7 @@ function isRecord(value) {
 }
 function invalidResponse(detail) {
     const error = new Error(`Invalid Certora API response: ${detail}`);
-    error.name = "ZeusApiResponseError";
+    error.name = "AutoProverApiResponseError";
     throw error;
 }
 function requestEnvelope(value) {
@@ -30305,7 +30305,7 @@ async function request(url, apiKey, options = {}, retries = constants_1.MAX_RETR
             ? constants_1.API_REQUEST_TIMEOUT_MS
             : deadlineMs - Date.now();
         if (remainingMs <= 0)
-            throw new ZeusApiDeadlineError();
+            throw new AutoProverApiDeadlineError();
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), Math.min(constants_1.API_REQUEST_TIMEOUT_MS, remainingMs));
         let serverRetryAfterMs = null;
@@ -30345,7 +30345,7 @@ async function request(url, apiKey, options = {}, retries = constants_1.MAX_RETR
             catch {
                 // Preserve the HTTP status if the upstream response is malformed.
             }
-            const error = new ZeusApiError(problem?.code ?? "unknown_error", problem?.detail ?? `HTTP ${response.status}: ${response.statusText}`, response.status, problem?.retryable ??
+            const error = new AutoProverApiError(problem?.code ?? "unknown_error", problem?.detail ?? `HTTP ${response.status}: ${response.statusText}`, response.status, problem?.retryable ??
                 (response.status === 429 || response.status >= 500), problem?.request_id, problem?.field_errors);
             if (!error.retryable)
                 throw error;
@@ -30353,14 +30353,14 @@ async function request(url, apiKey, options = {}, retries = constants_1.MAX_RETR
             serverRetryAfterMs = retryAfterMs(response);
         }
         catch (error) {
-            if (error instanceof ZeusApiError && !error.retryable)
+            if (error instanceof AutoProverApiError && !error.retryable)
                 throw error;
             if (error instanceof Error && error.name === "AbortError") {
                 if (deadlineMs !== undefined && deadlineMs <= Date.now()) {
-                    throw new ZeusApiDeadlineError();
+                    throw new AutoProverApiDeadlineError();
                 }
                 lastError = new Error("Certora API request timed out.");
-                lastError.name = "ZeusApiTimeoutError";
+                lastError.name = "AutoProverApiTimeoutError";
             }
             else {
                 lastError = error instanceof Error ? error : new Error(String(error));
@@ -30374,7 +30374,7 @@ async function request(url, apiKey, options = {}, retries = constants_1.MAX_RETR
                 ? Number.POSITIVE_INFINITY
                 : deadlineMs - Date.now();
             if (remainingBeforeRetry <= 0)
-                throw new ZeusApiDeadlineError();
+                throw new AutoProverApiDeadlineError();
             const delay = Math.min(serverRetryAfterMs ?? 1000 * 2 ** attempt, 30_000, remainingBeforeRetry);
             core.info(`Request failed, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${retries})...`);
             await sleep(delay);
@@ -30382,7 +30382,7 @@ async function request(url, apiKey, options = {}, retries = constants_1.MAX_RETR
     }
     throw lastError ?? new Error("Request failed after all retries");
 }
-class ZeusApi {
+class AutoProverApi {
     baseUrl;
     apiKey;
     constructor(baseUrl, apiKey) {
@@ -30417,7 +30417,7 @@ class ZeusApi {
         return decodeCommit(await request(`${this.baseUrl}/v2/runs/${runId}/generated-files/commit`, this.apiKey, { method: "POST" }, constants_1.MAX_RETRY_ATTEMPTS));
     }
 }
-exports.ZeusApi = ZeusApi;
+exports.AutoProverApi = AutoProverApi;
 
 
 /***/ }),
@@ -30749,7 +30749,7 @@ function getConfig() {
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.FINDING_MAX = exports.INSTRUCTIONS_MAX = exports.PATTERN_ARRAY_MAX = exports.PATTERN_MAX = exports.CONTRACT_NAME_MAX = exports.REPOSITORY_PATH_MAX = exports.SHUTDOWN_CANCEL_TIMEOUT_MS = exports.CANCELLATION_REQUEST_TIMEOUT_MS = exports.API_REQUEST_TIMEOUT_MS = exports.MAX_CONSECUTIVE_POLL_FAILURES = exports.MAX_RETRY_ATTEMPTS = exports.SHA_REGEX = exports.DEFAULT_MAX_ITERATIONS = exports.DEFAULT_TIMEOUT = exports.DEFAULT_POLL_INTERVAL = exports.PR_COMMENT_MARKER = exports.LEGACY_ZEUS_AUDIT_LABEL = exports.ZEUS_AUDIT_LABEL = exports.SEVERITY_LABEL_PREFIX = exports.SEVERITY_EMOJI = exports.SEVERITY_ORDER = void 0;
+exports.FINDING_MAX = exports.INSTRUCTIONS_MAX = exports.PATTERN_ARRAY_MAX = exports.PATTERN_MAX = exports.CONTRACT_NAME_MAX = exports.REPOSITORY_PATH_MAX = exports.SHUTDOWN_CANCEL_TIMEOUT_MS = exports.CANCELLATION_REQUEST_TIMEOUT_MS = exports.API_REQUEST_TIMEOUT_MS = exports.MAX_CONSECUTIVE_POLL_FAILURES = exports.MAX_RETRY_ATTEMPTS = exports.SHA_REGEX = exports.DEFAULT_MAX_ITERATIONS = exports.DEFAULT_TIMEOUT = exports.DEFAULT_POLL_INTERVAL = exports.PR_COMMENT_MARKER = exports.AUTO_PROVER_LABEL = exports.AI_AUDITOR_LABEL = exports.SEVERITY_LABEL_PREFIX = exports.SEVERITY_EMOJI = exports.SEVERITY_ORDER = void 0;
 exports.prCommentMarker = prCommentMarker;
 exports.SEVERITY_ORDER = {
     HIGH: 0,
@@ -30764,11 +30764,9 @@ exports.SEVERITY_EMOJI = {
     INFO: "\u{1F535}",
 };
 exports.SEVERITY_LABEL_PREFIX = "ai-auditor:";
-exports.ZEUS_AUDIT_LABEL = "ai-auditor";
-exports.LEGACY_ZEUS_AUDIT_LABEL = "auto-prover";
-// Keep the original marker so runs after the repository rename update existing
-// pull-request comments instead of creating duplicates.
-exports.PR_COMMENT_MARKER = "<!-- zeus-guardian-ci -->";
+exports.AI_AUDITOR_LABEL = "ai-auditor";
+exports.AUTO_PROVER_LABEL = "auto-prover";
+exports.PR_COMMENT_MARKER = "<!-- autoprover-guardian-ci -->";
 function prCommentMarker(workflow) {
     return `<!-- certora-guardian-ci:${workflow} -->`;
 }
@@ -31166,7 +31164,7 @@ function generatedRunIdFromCommitMessage(message) {
     while (lines.at(-1) === "")
         lines.pop();
     const trailer = lines.at(-1);
-    const match = trailer?.match(/^(?:Certora-Guardian-Run|Zeus-Guardian-Job): ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/);
+    const match = trailer?.match(/^Certora-Guardian-Run: ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/);
     return match?.[1] ?? null;
 }
 class GitHubClient {
@@ -31193,7 +31191,7 @@ class GitHubClient {
             }
             catch {
                 try {
-                    const color = label === constants_1.ZEUS_AUDIT_LABEL || label === constants_1.LEGACY_ZEUS_AUDIT_LABEL
+                    const color = label === constants_1.AI_AUDITOR_LABEL || label === constants_1.AUTO_PROVER_LABEL
                         ? "7B3FE4"
                         : label.startsWith(constants_1.SEVERITY_LABEL_PREFIX)
                             ? label.includes("high")
@@ -31386,8 +31384,8 @@ const core = __importStar(__nccwpck_require__(6966));
 const api_1 = __nccwpck_require__(7822);
 const run_1 = __nccwpck_require__(3587);
 (0, run_1.run)().catch((error) => {
-    if (error instanceof api_1.ZeusApiError) {
-        core.setFailed((0, api_1.getZeusApiErrorMessage)(error));
+    if (error instanceof api_1.AutoProverApiError) {
+        core.setFailed((0, api_1.getAutoProverApiErrorMessage)(error));
     }
     else {
         core.setFailed(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
@@ -32049,7 +32047,7 @@ async function run() {
     core.info(`Workflow: ${config.workflow}`);
     core.info(`Base commit: ${config.baseCommitSha}`);
     core.info(`Head commit: ${config.headCommitSha}`);
-    const api = new api_1.ZeusApi(config.apiBaseUrl, config.apiKey);
+    const api = new api_1.AutoProverApi(config.apiBaseUrl, config.apiKey);
     if (isStandaloneConfig(config)) {
         const ghClient = new github_1.GitHubClient(config.githubToken);
         if (await tryGeneratedFollowup(config, api, ghClient))

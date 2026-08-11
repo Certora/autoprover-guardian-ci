@@ -2,11 +2,11 @@ import * as core from "@actions/core";
 import * as github from "@actions/github";
 import type { Finding, Severity } from "./types";
 import {
-  LEGACY_ZEUS_AUDIT_LABEL,
+  AI_AUDITOR_LABEL,
+  AUTO_PROVER_LABEL,
   PR_COMMENT_MARKER,
   SHA_REGEX,
   SEVERITY_LABEL_PREFIX,
-  ZEUS_AUDIT_LABEL,
 } from "./constants";
 import { formatIssueTitle, formatIssueBody } from "./format";
 
@@ -17,7 +17,7 @@ function generatedRunIdFromCommitMessage(message: string): string | null {
   while (lines.at(-1) === "") lines.pop();
   const trailer = lines.at(-1);
   const match = trailer?.match(
-    /^(?:Certora-Guardian-Run|Zeus-Guardian-Job): ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/,
+    /^Certora-Guardian-Run: ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/,
   );
   return match?.[1] ?? null;
 }
@@ -52,7 +52,7 @@ export class GitHubClient {
       } catch {
         try {
           const color =
-            label === ZEUS_AUDIT_LABEL || label === LEGACY_ZEUS_AUDIT_LABEL
+            label === AI_AUDITOR_LABEL || label === AUTO_PROVER_LABEL
               ? "7B3FE4"
               : label.startsWith(SEVERITY_LABEL_PREFIX)
                 ? label.includes("high")

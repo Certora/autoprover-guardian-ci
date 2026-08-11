@@ -1,6 +1,6 @@
-# Certora Guardian CI
+# AutoProver Guardian CI
 
-Certora Guardian CI runs one Certora workflow for every pull request:
+AutoProver Guardian CI runs one Certora workflow for every pull request:
 
 - `ai-auditor-full`
 - `ai-auditor-diff` (default)
@@ -38,7 +38,7 @@ jobs:
   certora:
     runs-on: ubuntu-latest
     steps:
-      - uses: Certora/zeus-guardian-ci@v2
+      - uses: Certora/autoprover-guardian-ci@v2
         with:
           api-key: ${{ secrets.CERTORA_API_KEY }}
           workflow: ai-auditor-diff
@@ -65,7 +65,7 @@ run succeeds. Fork pull requests are rejected for these two workflows.
 ### Full AI Auditor run
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v2
+- uses: Certora/autoprover-guardian-ci@v2
   with:
     api-key: ${{ secrets.CERTORA_API_KEY }}
     workflow: ai-auditor-full
@@ -78,7 +78,7 @@ run succeeds. Fork pull requests are rejected for these two workflows.
 ### Diff AI Auditor run
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v2
+- uses: Certora/autoprover-guardian-ci@v2
   with:
     api-key: ${{ secrets.CERTORA_API_KEY }}
     workflow: ai-auditor-diff
@@ -89,7 +89,7 @@ run succeeds. Fork pull requests are rejected for these two workflows.
 ### AI Auditor finding validation
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v2
+- uses: Certora/autoprover-guardian-ci@v2
   with:
     api-key: ${{ secrets.CERTORA_API_KEY }}
     workflow: ai-auditor-finding-validation
@@ -106,7 +106,7 @@ output in a later workflow step when repository policy should fail on it.
 ### AutoProver
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v2
+- uses: Certora/autoprover-guardian-ci@v2
   with:
     api-key: ${{ secrets.CERTORA_API_KEY }}
     workflow: auto-prover
@@ -119,7 +119,7 @@ output in a later workflow step when repository policy should fail on it.
 ### AutoFoundry
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v2
+- uses: Certora/autoprover-guardian-ci@v2
   with:
     api-key: ${{ secrets.CERTORA_API_KEY }}
     workflow: auto-foundry
@@ -141,10 +141,7 @@ Certora-Guardian-Run: <UUID>
 When GitHub runs Guardian again for that commit, the action validates the
 trailer against the canonical run, result, workflow, contract, delivery, and
 current pull-request head. It reports the original outcome without launching
-or billing another run. During the v2 transition, Guardian also recognizes the
-legacy exact trailer `Zeus-Guardian-Job: <UUID>` so an existing generated commit
-cannot accidentally trigger a second paid run. Text that matches neither exact
-trailer is ignored.
+or billing another run. Text that does not match the exact trailer is ignored.
 
 If a successful run has no commit-worthy generated files, the delivery status
 is `no_changes`; `generated-commit-sha` remains empty and no follow-up is
@@ -223,7 +220,7 @@ errors, so correcting the repository access or path and rerunning is safe.
 ## Custom API environment
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v2
+- uses: Certora/autoprover-guardian-ci@v2
   with:
     api-key: ${{ secrets.CERTORA_API_KEY }}
     workflow: ai-auditor-diff

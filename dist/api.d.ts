@@ -1,5 +1,5 @@
 import type { CommitGeneratedFilesResponse, EstimateResponse, RunRequest, RunResponse, RunResultResponse, Workflow } from "./types";
-export declare class ZeusApiError extends Error {
+export declare class AutoProverApiError extends Error {
     code: string;
     statusCode: number;
     retryable: boolean;
@@ -7,13 +7,13 @@ export declare class ZeusApiError extends Error {
     fieldErrors?: Record<string, string[]> | undefined;
     constructor(code: string, message: string, statusCode: number, retryable: boolean, requestId?: string | undefined, fieldErrors?: Record<string, string[]> | undefined);
 }
-export declare class ZeusApiDeadlineError extends Error {
+export declare class AutoProverApiDeadlineError extends Error {
     constructor();
 }
-export declare function getZeusApiErrorMessage(error: ZeusApiError): string;
+export declare function getAutoProverApiErrorMessage(error: AutoProverApiError): string;
 /** Stable across action retries and process restarts for an identical launch. */
 export declare function createIdempotencyKey(workflow: Workflow, body: RunRequest, executionSeed: string): string;
-export declare class ZeusApi {
+export declare class AutoProverApi {
     private baseUrl;
     private apiKey;
     constructor(baseUrl: string, apiKey: string);

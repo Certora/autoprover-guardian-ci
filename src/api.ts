@@ -15,7 +15,7 @@ import {
   SHA_REGEX,
 } from "./constants";
 
-export class ZeusApiError extends Error {
+export class AutoProverApiError extends Error {
   constructor(
     public code: string,
     message: string,
@@ -25,18 +25,20 @@ export class ZeusApiError extends Error {
     public fieldErrors?: Record<string, string[]>,
   ) {
     super(message);
-    this.name = "ZeusApiError";
+    this.name = "AutoProverApiError";
   }
 }
 
-export class ZeusApiDeadlineError extends Error {
+export class AutoProverApiDeadlineError extends Error {
   constructor() {
-    super("The configured run timeout expired during a Zeus API request.");
-    this.name = "ZeusApiDeadlineError";
+    super("The configured run timeout expired during an AutoProver API request.");
+    this.name = "AutoProverApiDeadlineError";
   }
 }
 
-export function getZeusApiErrorMessage(error: ZeusApiError): string {
+export function getAutoProverApiErrorMessage(
+  error: AutoProverApiError,
+): string {
   switch (error.code) {
     case "invalid_api_key":
     case "invalid_bearer_token":
@@ -105,7 +107,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function invalidResponse(detail: string): never {
   const error = new Error(`Invalid Certora API response: ${detail}`);
-  error.name = "ZeusApiResponseError";
+  error.name = "AutoProverApiResponseError";
   throw error;
 }
 
@@ -403,7 +405,7 @@ async function request<T>(
       deadlineMs === undefined
         ? API_REQUEST_TIMEOUT_MS
         : deadlineMs - Date.now();
-    if (remainingMs <= 0) throw new ZeusApiDeadlineError();
+    if (remainingMs <= 0) throw new AutoProverApiDeadlineError();
 
     const controller = new AbortController();
     const timeout = setTimeout(
@@ -454,7 +456,7 @@ async function request<T>(
         // Preserve the HTTP status if the upstream response is malformed.
       }
 
-      const error = new ZeusApiError(
+      const error = new AutoProverApiError(
         problem?.code ?? "unknown_error",
         problem?.detail ?? `HTTP ${response.status}: ${response.statusText}`,
         response.status,
@@ -467,13 +469,13 @@ async function request<T>(
       lastError = error;
       serverRetryAfterMs = retryAfterMs(response);
     } catch (error) {
-      if (error instanceof ZeusApiError && !error.retryable) throw error;
+      if (error instanceof AutoProverApiError && !error.retryable) throw error;
       if (error instanceof Error && error.name === "AbortError") {
         if (deadlineMs !== undefined && deadlineMs <= Date.now()) {
-          throw new ZeusApiDeadlineError();
+          throw new AutoProverApiDeadlineError();
         }
         lastError = new Error("Certora API request timed out.");
-        lastError.name = "ZeusApiTimeoutError";
+        lastError.name = "AutoProverApiTimeoutError";
       } else {
         lastError = error instanceof Error ? error : new Error(String(error));
       }
@@ -486,7 +488,8 @@ async function request<T>(
         deadlineMs === undefined
           ? Number.POSITIVE_INFINITY
           : deadlineMs - Date.now();
-      if (remainingBeforeRetry <= 0) throw new ZeusApiDeadlineError();
+      if (remainingBeforeRetry <= 0)
+        throw new AutoProverApiDeadlineError();
       const delay = Math.min(
         serverRetryAfterMs ?? 1000 * 2 ** attempt,
         30_000,
@@ -502,7 +505,7 @@ async function request<T>(
   throw lastError ?? new Error("Request failed after all retries");
 }
 
-export class ZeusApi {
+export class AutoProverApi {
   constructor(
     private baseUrl: string,
     private apiKey: string,

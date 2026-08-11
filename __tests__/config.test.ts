@@ -10,16 +10,16 @@ const { getInputMock, githubContextMock, inputs, setSecretMock } = vi.hoisted(
         pull_request: {
           base: {
             sha: "a".repeat(40),
-            repo: { full_name: "Certora/zeus-guardian-ci" },
+            repo: { full_name: "Certora/autoprover-guardian-ci" },
           },
           head: {
             sha: "b".repeat(40),
-            repo: { full_name: "Certora/zeus-guardian-ci" },
+            repo: { full_name: "Certora/autoprover-guardian-ci" },
           },
           number: 42,
         },
       },
-      repo: { owner: "Certora", repo: "zeus-guardian-ci" },
+      repo: { owner: "Certora", repo: "autoprover-guardian-ci" },
       runId: 123,
       runAttempt: 2,
       job: "certora",
@@ -46,7 +46,7 @@ describe("getConfig v2", () => {
     inputs.set("context", "contracts/**/*.sol");
     githubContextMock.payload.repository.private = false;
     githubContextMock.payload.pull_request.head.repo.full_name =
-      "Certora/zeus-guardian-ci";
+      "Certora/autoprover-guardian-ci";
     githubContextMock.runAttempt = 2;
     getInputMock.mockImplementation(
       (name: string, options?: { required?: boolean }) => {
@@ -61,7 +61,7 @@ describe("getConfig v2", () => {
     expect(getConfig()).toMatchObject({
       workflow: "ai-auditor-diff",
       apiBaseUrl: "https://app.certora.com",
-      repositoryUrl: "https://github.com/Certora/zeus-guardian-ci",
+      repositoryUrl: "https://github.com/Certora/autoprover-guardian-ci",
       repositoryPrivate: false,
       baseCommitSha: "a".repeat(40),
       headCommitSha: "b".repeat(40),

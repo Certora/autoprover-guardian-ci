@@ -34,7 +34,7 @@ vi.mock("@actions/core", () => ({
 vi.mock("../src/config", () => ({ getConfig: getConfigMock }));
 vi.mock("../src/api", () => ({
   createIdempotencyKey: createIdempotencyKeyMock,
-  ZeusApi: vi.fn(function ZeusApi() {
+  AutoProverApi: vi.fn(function AutoProverApi() {
     return apiMethods;
   }),
 }));
@@ -70,7 +70,7 @@ function aiConfig(
   return {
     workflow,
     apiKey: "certora_test",
-    apiBaseUrl: "https://zeus.certora.com",
+    apiBaseUrl: "https://app.certora.com",
     githubToken: "ghs_local_only",
     pollInterval: 1,
     timeout: 1,
@@ -101,7 +101,7 @@ function standaloneConfig(
   return {
     workflow,
     apiKey: "certora_test",
-    apiBaseUrl: "https://zeus.certora.com",
+    apiBaseUrl: "https://app.certora.com",
     githubToken: "ghs_local_only",
     pollInterval: 1,
     timeout: 1,
@@ -220,7 +220,7 @@ function runResource(
       status === "succeeded" || status === "failed"
         ? "2026-08-07T00:05:00.000Z"
         : null,
-    dashboard_url: `https://zeus.certora.com/runs/${RUN_ID}`,
+    dashboard_url: `https://app.certora.com/runs/${RUN_ID}`,
   };
 }
 

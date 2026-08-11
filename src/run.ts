@@ -1,5 +1,5 @@
 import * as core from "@actions/core";
-import { createIdempotencyKey, ZeusApi } from "./api";
+import { AutoProverApi, createIdempotencyKey } from "./api";
 import { getConfig } from "./config";
 import {
   formatAiAuditorMarkdownPrComment,
@@ -466,13 +466,13 @@ function validateRunIdentity(
   }
 }
 
-let activeRun: { api: ZeusApi; runId: string; config: ActionConfig } | null =
+let activeRun: { api: AutoProverApi; runId: string; config: ActionConfig } | null =
   null;
 let shutdownHandlersRegistered = false;
 let shuttingDown = false;
 
 async function requestCancellation(
-  api: ZeusApi,
+  api: AutoProverApi,
   runId: string,
   config: ActionConfig,
   deadlineMs?: number,
@@ -518,7 +518,7 @@ function registerShutdownHandlers(): void {
 }
 
 async function publishStandaloneResult(args: {
-  api: ZeusApi;
+  api: AutoProverApi;
   config: StandaloneActionConfig;
   ghClient: GitHubClient;
   run: Run;
@@ -614,7 +614,7 @@ async function publishStandaloneResult(args: {
 
 async function tryGeneratedFollowup(
   config: StandaloneActionConfig,
-  api: ZeusApi,
+  api: AutoProverApi,
   ghClient: GitHubClient,
 ): Promise<boolean> {
   const followup = await ghClient.getGeneratedFollowup(config.headCommitSha);
@@ -650,7 +650,7 @@ async function tryGeneratedFollowup(
 }
 
 async function pollRun(
-  api: ZeusApi,
+  api: AutoProverApi,
   initialRun: Run,
   runId: string,
   config: ActionConfig,
@@ -752,7 +752,7 @@ async function pollRun(
 }
 
 async function publishFindingValidationResult(
-  api: ZeusApi,
+  api: AutoProverApi,
   config: FindingValidationActionConfig,
   run: Run,
   runId: string,
@@ -788,7 +788,7 @@ async function publishFindingValidationResult(
 }
 
 async function publishAiAuditorResult(
-  api: ZeusApi,
+  api: AutoProverApi,
   config: AiAuditorActionConfig,
   run: Run,
   runId: string,
@@ -896,7 +896,7 @@ export async function run(): Promise<void> {
   core.info(`Base commit: ${config.baseCommitSha}`);
   core.info(`Head commit: ${config.headCommitSha}`);
 
-  const api = new ZeusApi(config.apiBaseUrl, config.apiKey);
+  const api = new AutoProverApi(config.apiBaseUrl, config.apiKey);
   if (isStandaloneConfig(config)) {
     const ghClient = new GitHubClient(config.githubToken);
     if (await tryGeneratedFollowup(config, api, ghClient)) return;
