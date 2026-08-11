@@ -141,7 +141,10 @@ Certora-Guardian-Run: <UUID>
 When GitHub runs Guardian again for that commit, the action validates the
 trailer against the canonical run, result, workflow, contract, delivery, and
 current pull-request head. It reports the original outcome without launching
-or billing another run. Text that does not match the exact trailer is ignored.
+or billing another run. For immutable commits created by earlier releases, the
+action also accepts the historical protocol trailer
+`Zeus-Guardian-Job: <UUID>`. New commits always use the current trailer. Text
+that matches neither exact trailer is ignored.
 
 If a successful run has no commit-worthy generated files, the delivery status
 is `no_changes`; `generated-commit-sha` remains empty and no follow-up is

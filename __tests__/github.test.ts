@@ -88,34 +88,39 @@ describe("GitHubClient", () => {
     });
   });
 
-  it("returns the UUID from an exact final commit-message trailer", async () => {
-    const trailer = `Certora-Guardian-Run: ${RUN_ID}`;
-    getCommitMock.mockResolvedValue({
-      data: {
-        sha: HEAD_SHA,
-        commit: {
-          message: `Add AutoProver artifacts for Vault\r\n\r\n${trailer}\r\n`,
+  it.each([
+    ["current", `Certora-Guardian-Run: ${RUN_ID}`],
+    ["legacy protocol", `Zeus-Guardian-Job: ${RUN_ID}`],
+  ])(
+    "returns the UUID from an exact final %s commit-message trailer",
+    async (_kind, trailer) => {
+      getCommitMock.mockResolvedValue({
+        data: {
+          sha: HEAD_SHA,
+          commit: {
+            message: `Add AutoProver artifacts for Vault\r\n\r\n${trailer}\r\n`,
+          },
+          parents: [{ sha: "a".repeat(40) }],
         },
-        parents: [{ sha: "a".repeat(40) }],
-      },
-    });
-    const client = new GitHubClient("github-token");
+      });
+      const client = new GitHubClient("github-token");
 
-    await expect(client.getGeneratedFollowup(HEAD_SHA)).resolves.toEqual({
-      runId: RUN_ID,
-      sourceCommitSha: "a".repeat(40),
-    });
+      await expect(client.getGeneratedFollowup(HEAD_SHA)).resolves.toEqual({
+        runId: RUN_ID,
+        sourceCommitSha: "a".repeat(40),
+      });
 
-    expect(getOctokitMock).toHaveBeenCalledWith("github-token");
-    expect(getCommitMock).toHaveBeenCalledWith({
-      owner: "Certora",
-      repo: "contracts",
-      ref: HEAD_SHA,
-    });
-    expect(infoMock).toHaveBeenCalledWith(
-      `Detected generated-commit follow-up marker for Certora run ${RUN_ID}.`,
-    );
-  });
+      expect(getOctokitMock).toHaveBeenCalledWith("github-token");
+      expect(getCommitMock).toHaveBeenCalledWith({
+        owner: "Certora",
+        repo: "contracts",
+        ref: HEAD_SHA,
+      });
+      expect(infoMock).toHaveBeenCalledWith(
+        `Detected generated-commit follow-up marker for Certora run ${RUN_ID}.`,
+      );
+    },
+  );
 
   it("paginates PR comments before updating the existing AutoProver Guardian comment", async () => {
     paginateMock.mockResolvedValue([
@@ -137,6 +142,25 @@ describe("GitHubClient", () => {
       repo: "contracts",
       comment_id: 202,
       body: "<!-- autoprover-guardian-ci -->\nnew result",
+    });
+    expect(createCommentMock).not.toHaveBeenCalled();
+  });
+
+  it("updates a legacy protocol comment instead of creating a duplicate", async () => {
+    paginateMock.mockResolvedValue([
+      { id: 202, body: "<!-- zeus-guardian-ci -->\nold result" },
+    ]);
+    const client = new GitHubClient("github-token");
+    const marker = "<!-- certora-guardian-ci:ai-auditor-diff -->";
+    const body = `${marker}\nnew result`;
+
+    await client.upsertPrComment(42, body, marker);
+
+    expect(updateCommentMock).toHaveBeenCalledWith({
+      owner: "Certora",
+      repo: "contracts",
+      comment_id: 202,
+      body,
     });
     expect(createCommentMock).not.toHaveBeenCalled();
   });
@@ -168,6 +192,9 @@ describe("GitHubClient", () => {
     ` Certora-Guardian-Run: ${RUN_ID}`,
     `certora-guardian-run: ${RUN_ID}`,
     `Certora-Guardian-Run: ${RUN_ID} `,
+    `Zeus-Guardian-Job: ${RUN_ID}\nadditional text`,
+    `zeus-guardian-job: ${RUN_ID}`,
+    `Zeus-Guardian-Job: ${RUN_ID} `,
   ])(
     "ignores a commit message without the exact final trailer: %s",
     async (message) => {

@@ -12,14 +12,26 @@ import { formatIssueTitle, formatIssueBody } from "./format";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
+// These protocol aliases must remain readable because generated commits and
+// pull-request comments are immutable external state. Removing either alias
+// can launch a duplicate paid run or create a duplicate summary comment.
+const LEGACY_GENERATED_RUN_TRAILER = "Zeus-Guardian-Job";
+const LEGACY_PR_COMMENT_MARKER = "<!-- zeus-guardian-ci -->";
+
 function generatedRunIdFromCommitMessage(message: string): string | null {
   const lines = message.split(/\r?\n/);
   while (lines.at(-1) === "") lines.pop();
   const trailer = lines.at(-1);
   const match = trailer?.match(
-    /^Certora-Guardian-Run: ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/,
+    /^([^:]+): ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/,
   );
-  return match?.[1] ?? null;
+  if (
+    match?.[1] !== "Certora-Guardian-Run" &&
+    match?.[1] !== LEGACY_GENERATED_RUN_TRAILER
+  ) {
+    return null;
+  }
+  return match[2] ?? null;
 }
 
 export class GitHubClient {
@@ -167,13 +179,17 @@ export class GitHubClient {
         },
       );
 
+      const fallbackMarkers =
+        marker === PR_COMMENT_MARKER
+          ? [LEGACY_PR_COMMENT_MARKER]
+          : [PR_COMMENT_MARKER, LEGACY_PR_COMMENT_MARKER];
       const existing =
         comments.find((comment) => comment.body?.includes(marker)) ??
-        (marker === PR_COMMENT_MARKER
-          ? undefined
-          : comments.find((comment) =>
-              comment.body?.includes(PR_COMMENT_MARKER),
-            ));
+        comments.find((comment) =>
+          fallbackMarkers.some((fallback) =>
+            comment.body?.includes(fallback),
+          ),
+        );
 
       if (existing) {
         await this.octokit.rest.issues.updateComment({

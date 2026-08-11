@@ -31159,13 +31159,22 @@ const core = __importStar(__nccwpck_require__(6966));
 const github = __importStar(__nccwpck_require__(4903));
 const constants_1 = __nccwpck_require__(5851);
 const format_1 = __nccwpck_require__(4923);
+// These protocol aliases must remain readable because generated commits and
+// pull-request comments are immutable external state. Removing either alias
+// can launch a duplicate paid run or create a duplicate summary comment.
+const LEGACY_GENERATED_RUN_TRAILER = "Zeus-Guardian-Job";
+const LEGACY_PR_COMMENT_MARKER = "<!-- zeus-guardian-ci -->";
 function generatedRunIdFromCommitMessage(message) {
     const lines = message.split(/\r?\n/);
     while (lines.at(-1) === "")
         lines.pop();
     const trailer = lines.at(-1);
-    const match = trailer?.match(/^Certora-Guardian-Run: ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/);
-    return match?.[1] ?? null;
+    const match = trailer?.match(/^([^:]+): ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/);
+    if (match?.[1] !== "Certora-Guardian-Run" &&
+        match?.[1] !== LEGACY_GENERATED_RUN_TRAILER) {
+        return null;
+    }
+    return match[2] ?? null;
 }
 class GitHubClient {
     octokit;
@@ -31281,10 +31290,11 @@ class GitHubClient {
                 issue_number: prNumber,
                 per_page: 100,
             });
+            const fallbackMarkers = marker === constants_1.PR_COMMENT_MARKER
+                ? [LEGACY_PR_COMMENT_MARKER]
+                : [constants_1.PR_COMMENT_MARKER, LEGACY_PR_COMMENT_MARKER];
             const existing = comments.find((comment) => comment.body?.includes(marker)) ??
-                (marker === constants_1.PR_COMMENT_MARKER
-                    ? undefined
-                    : comments.find((comment) => comment.body?.includes(constants_1.PR_COMMENT_MARKER)));
+                comments.find((comment) => fallbackMarkers.some((fallback) => comment.body?.includes(fallback)));
             if (existing) {
                 await this.octokit.rest.issues.updateComment({
                     owner: this.owner,

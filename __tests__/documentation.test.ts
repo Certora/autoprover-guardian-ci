@@ -49,6 +49,7 @@ describe("published v2 documentation", () => {
     expect(readme).toContain("`run-id`");
     expect(action).toContain("run-id:");
     expect(readme).toContain("Certora-Guardian-Run: <UUID>");
+    expect(readme).toContain("Zeus-Guardian-Job: <UUID>");
     expect(readme).toContain("empty-body");
   });
 
