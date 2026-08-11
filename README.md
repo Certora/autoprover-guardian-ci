@@ -9,9 +9,11 @@ Certora Guardian CI runs one Certora workflow for every pull request:
 - `auto-foundry`
 
 The action uses the public `/v2` run API. It estimates each run before launch,
-submits launches with a deterministic `Idempotency-Key`, and polls the canonical
-run resource until it succeeds, fails, or is cancelled. There is no separate
-progress endpoint.
+submits launches with a deterministic `Idempotency-Key`, forwards the optional
+AISS `Estimate-Quote-Id`, and polls the canonical run resource until it
+succeeds, fails, or is cancelled. Quote forwarding is automatic and requires no
+workflow input; AI Auditor estimates do not return a quote. There is no
+separate progress endpoint.
 
 ## Quick start
 
@@ -167,16 +169,22 @@ statuses are `queued`, `running`, `finalizing`, `succeeded`, `failed`,
 `cancelling`, and `cancelled`. A succeeded run guarantees that its result is
 ready and billing is settled.
 
+For AutoProver and AutoFoundry, estimate and launch resolve the exact remote
+commit and `contract-path` before issuing a quote or reserving balance. An
+unavailable commit returns `source_revision_not_found`; a missing or unreadable
+contract returns `contract_not_found`. Guardian reports both as terminal input
+errors, so correcting the repository access or path and rerunning is safe.
+
 ## Inputs
 
 | Input               | Required           | Default                   | Description                                            |
 | ------------------- | ------------------ | ------------------------- | ------------------------------------------------------ |
 | `api-key`           | Yes                | —                         | Certora organization API key                           |
 | `workflow`          | No                 | `ai-auditor-diff`         | One of the five workflows listed above                 |
-| `context`           | AI Auditor         | —                         | Comma-separated repository glob patterns               |
+| `context`           | AI Auditor         | —                         | Comma-separated repository globs, 500 chars each       |
 | `finding`           | Finding validation | —                         | Finding description to validate, up to 8000 characters |
 | `scope`             | No                 | —                         | Full-run focus paths, within `context`                 |
-| `instructions`      | No                 | —                         | Custom AI Auditor instructions                         |
+| `instructions`      | No                 | —                         | Custom AI Auditor instructions, up to 10,000 chars     |
 | `use-memory`        | No                 | `true`                    | Use repository memory for full runs                    |
 | `max-iterations`    | No                 | `6`                       | AI Auditor iterations, from 4 through 10               |
 | `skip-submodules`   | No                 | `false`                   | Skip repository submodules                             |

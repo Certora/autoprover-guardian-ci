@@ -146,6 +146,16 @@ describe("getConfig v2", () => {
     expect(() => getConfig()).toThrow("finding is required");
   });
 
+  it.each([
+    ["context", `${"a".repeat(501)},contracts/**/*.sol`, "500 characters"],
+    ["scope", "contracts/**/*.sol,src/\u0000Vault.sol", "null bytes"],
+    ["instructions", "x".repeat(10_001), "10000 characters"],
+  ])("mirrors the API limit for %s", (name, value, message) => {
+    inputs.set("workflow", "ai-auditor-full");
+    inputs.set(name, value);
+    expect(() => getConfig()).toThrow(message);
+  });
+
   it("rejects invalid workflows", () => {
     inputs.set("workflow", "finding-validation");
     expect(() => getConfig()).toThrow("workflow must be");

@@ -61,6 +61,7 @@ import { workflowRunType } from "../src/types";
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 const RETRY_RUN_ID = "22222222-2222-4222-8222-222222222222";
+const ESTIMATE_QUOTE_ID = "33333333-3333-4333-8333-333333333333";
 const HEAD_SHA = "b".repeat(40);
 
 function aiConfig(
@@ -223,7 +224,7 @@ function runResource(
   };
 }
 
-function estimate(canLaunch = true) {
+function estimate(canLaunch = true, estimateQuoteId?: string) {
   return {
     request_id: "req-estimate",
     estimate: {
@@ -231,6 +232,7 @@ function estimate(canLaunch = true) {
       minimum_balance_required_usd: "10.0000",
       balance_usd: canLaunch ? "100.0000" : "1.0000",
       can_launch: canLaunch,
+      ...(estimateQuoteId ? { estimate_quote_id: estimateQuoteId } : undefined),
     },
   };
 }
@@ -376,6 +378,7 @@ describe("run v2 orchestration", () => {
       config.workflow,
       expectedBody,
       "certora-guardian-stable",
+      undefined,
     );
     expect(setOutputMock).toHaveBeenCalledWith("run-id", RUN_ID);
     expect(setOutputMock).toHaveBeenCalledWith("status", "succeeded");
@@ -503,12 +506,14 @@ describe("run v2 orchestration", () => {
         config.workflow,
         buildRunRequest(config),
         "certora-guardian-stable",
+        undefined,
       );
       expect(apiMethods.createRun).toHaveBeenNthCalledWith(
         2,
         config.workflow,
         buildRunRequest(config),
         "certora-guardian-attempt-2",
+        undefined,
       );
       expect(apiMethods.createRun).toHaveBeenCalledTimes(2);
       expect(apiMethods.getResult).toHaveBeenCalledWith(RETRY_RUN_ID);
@@ -712,6 +717,7 @@ describe("run v2 orchestration", () => {
   it("binds AutoProver delivery at launch and commits with an empty API call", async () => {
     const config = standaloneConfig("auto-prover");
     getConfigMock.mockReturnValue(config);
+    apiMethods.estimateRun.mockResolvedValue(estimate(true, ESTIMATE_QUOTE_ID));
     apiMethods.createRun.mockResolvedValue({
       request_id: "req",
       run: runResource(config.workflow),
@@ -725,6 +731,12 @@ describe("run v2 orchestration", () => {
       delivery: { type: "github_pull_request", pull_request_number: 42 },
     });
     expect(apiMethods.commitGeneratedFiles).toHaveBeenCalledWith(RUN_ID);
+    expect(apiMethods.createRun).toHaveBeenCalledWith(
+      config.workflow,
+      buildRunRequest(config),
+      "certora-guardian-stable",
+      ESTIMATE_QUOTE_ID,
+    );
     expect(apiMethods.getResult).toHaveBeenCalledWith(RUN_ID);
     expect(apiMethods.commitGeneratedFiles.mock.calls[0]).toHaveLength(1);
     expect(setOutputMock).toHaveBeenCalledWith(

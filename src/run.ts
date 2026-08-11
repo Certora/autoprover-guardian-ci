@@ -920,8 +920,14 @@ export async function run(): Promise<void> {
     body,
     config.idempotencySeed,
   );
-  let currentRun = (await api.createRun(config.workflow, body, idempotencyKey))
-    .run;
+  let currentRun = (
+    await api.createRun(
+      config.workflow,
+      body,
+      idempotencyKey,
+      estimate.estimate_quote_id,
+    )
+  ).run;
   let currentRunId = currentRun.id;
   const canonicalRunWasTerminalAtRecovery =
     currentRun.status === "failed" || currentRun.status === "cancelled";
@@ -965,7 +971,12 @@ export async function run(): Promise<void> {
         `GitHub rerun attempt ${config.githubRunAttempt} recovered terminal ${currentRun.status} run ${currentRunId}; launching one attempt-scoped retry.`,
       );
       currentRun = (
-        await api.createRun(config.workflow, body, retryIdempotencyKey)
+        await api.createRun(
+          config.workflow,
+          body,
+          retryIdempotencyKey,
+          estimate.estimate_quote_id,
+        )
       ).run;
       currentRunId = currentRun.id;
       continue;

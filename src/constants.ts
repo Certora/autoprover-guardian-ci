@@ -40,3 +40,7 @@ export const CANCELLATION_REQUEST_TIMEOUT_MS = 15_000;
 export const SHUTDOWN_CANCEL_TIMEOUT_MS = 5_000;
 export const REPOSITORY_PATH_MAX = 500;
 export const CONTRACT_NAME_MAX = 200;
+export const PATTERN_MAX = 500;
+export const PATTERN_ARRAY_MAX = 5_000;
+export const INSTRUCTIONS_MAX = 10_000;
+export const FINDING_MAX = 8_000;

@@ -101,6 +101,7 @@ export type RunEstimate = {
   minimum_balance_required_usd: string;
   balance_usd: string;
   can_launch: boolean;
+  estimate_quote_id?: string;
 };
 
 export type EstimateResponse = {

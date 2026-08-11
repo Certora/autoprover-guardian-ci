@@ -17,3 +17,7 @@ export declare const CANCELLATION_REQUEST_TIMEOUT_MS = 15000;
 export declare const SHUTDOWN_CANCEL_TIMEOUT_MS = 5000;
 export declare const REPOSITORY_PATH_MAX = 500;
 export declare const CONTRACT_NAME_MAX = 200;
+export declare const PATTERN_MAX = 500;
+export declare const PATTERN_ARRAY_MAX = 5000;
+export declare const INSTRUCTIONS_MAX = 10000;
+export declare const FINDING_MAX = 8000;

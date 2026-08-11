@@ -6,6 +6,10 @@ import {
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_POLL_INTERVAL,
   DEFAULT_TIMEOUT,
+  FINDING_MAX,
+  INSTRUCTIONS_MAX,
+  PATTERN_ARRAY_MAX,
+  PATTERN_MAX,
   REPOSITORY_PATH_MAX,
   SHA_REGEX,
 } from "./constants";
@@ -42,6 +46,41 @@ function parseCommaSeparated(input: string): string[] {
     .split(",")
     .map((p) => p.trim())
     .filter(Boolean);
+}
+
+function parseApiPatternList(input: string, name: string): string[] {
+  const patterns = parseCommaSeparated(input);
+  if (patterns.length > PATTERN_ARRAY_MAX) {
+    throw new Error(
+      `${name} must contain at most ${PATTERN_ARRAY_MAX} patterns.`,
+    );
+  }
+  for (const pattern of patterns) {
+    if (pattern.length > PATTERN_MAX) {
+      throw new Error(
+        `${name} patterns must be at most ${PATTERN_MAX} characters.`,
+      );
+    }
+    if (pattern.includes("\u0000")) {
+      throw new Error(`${name} patterns must not contain null bytes.`);
+    }
+  }
+  return patterns;
+}
+
+function parseOptionalApiText(
+  input: string,
+  name: string,
+  max: number,
+): string | undefined {
+  if (!input) return undefined;
+  if (input.length > max) {
+    throw new Error(`${name} must be at most ${max} characters.`);
+  }
+  if (input.includes("\u0000")) {
+    throw new Error(`${name} must not contain null bytes.`);
+  }
+  return input;
 }
 
 function parsePositiveInteger(input: string, name: string): number {
@@ -286,7 +325,7 @@ export function getConfig(): ActionConfig {
   }
 
   const contextInput = core.getInput("context");
-  const context = parseCommaSeparated(contextInput);
+  const context = parseApiPatternList(contextInput, "context");
 
   if (context.length === 0) {
     throw new Error("At least one context pattern is required.");
@@ -297,8 +336,8 @@ export function getConfig(): ActionConfig {
     if (!finding) {
       throw new Error("finding is required for this workflow.");
     }
-    if (finding.length > 8_000) {
-      throw new Error("finding must be at most 8000 characters.");
+    if (finding.length > FINDING_MAX) {
+      throw new Error(`finding must be at most ${FINDING_MAX} characters.`);
     }
     if (finding.includes("\u0000")) {
       throw new Error("finding must not contain null bytes.");
@@ -328,14 +367,18 @@ export function getConfig(): ActionConfig {
   }
 
   const scopeInput = core.getInput("scope") || "";
-  const scope = parseCommaSeparated(scopeInput);
+  const scope = parseApiPatternList(scopeInput, "scope");
 
   return {
     ...common,
     workflow,
     context,
     scope: scope.length > 0 ? scope : undefined,
-    instructions: core.getInput("instructions") || undefined,
+    instructions: parseOptionalApiText(
+      core.getInput("instructions"),
+      "instructions",
+      INSTRUCTIONS_MAX,
+    ),
     useMemory: parseBoolean(core.getInput("use-memory"), "use-memory", true),
     maxIterations,
     skipSubmodules: parseBoolean(

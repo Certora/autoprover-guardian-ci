@@ -22,6 +22,7 @@ export class ZeusApiError extends Error {
     public statusCode: number,
     public retryable: boolean,
     public requestId?: string,
+    public fieldErrors?: Record<string, string[]>,
   ) {
     super(message);
     this.name = "ZeusApiError";
@@ -45,6 +46,10 @@ export function getZeusApiErrorMessage(error: ZeusApiError): string {
     case "missing_scope":
     case "insufficient_scope":
       return "The Certora API key does not have the scope required by this workflow.";
+    case "source_revision_not_found":
+      return "Certora could not resolve the pull request commit. Confirm the commit still exists on the remote and that the Certora GitHub App can read this repository. No balance reservation was created.";
+    case "contract_not_found":
+      return "The configured contract-path does not exist or cannot be read at the pull request commit. Check the contract-path input and its casing. No balance reservation was created.";
     default:
       return `Certora API error (${error.code}): ${error.message}`;
   }
@@ -122,7 +127,10 @@ function decodeEstimate(value: unknown): EstimateResponse {
     !USD_REGEX.test(estimate.minimum_balance_required_usd) ||
     typeof estimate.balance_usd !== "string" ||
     !SIGNED_USD_REGEX.test(estimate.balance_usd) ||
-    typeof estimate.can_launch !== "boolean"
+    typeof estimate.can_launch !== "boolean" ||
+    (estimate.estimate_quote_id !== undefined &&
+      (typeof estimate.estimate_quote_id !== "string" ||
+        !UUID_REGEX.test(estimate.estimate_quote_id)))
   ) {
     invalidResponse("malformed estimate");
   }
@@ -431,7 +439,14 @@ async function request<T>(
           (candidate.retryable === undefined ||
             typeof candidate.retryable === "boolean") &&
           (candidate.request_id === undefined ||
-            typeof candidate.request_id === "string")
+            typeof candidate.request_id === "string") &&
+          (candidate.field_errors === undefined ||
+            (isRecord(candidate.field_errors) &&
+              Object.values(candidate.field_errors).every(
+                (messages) =>
+                  Array.isArray(messages) &&
+                  messages.every((message) => typeof message === "string"),
+              )))
         ) {
           problem = candidate as ProblemDetails;
         }
@@ -446,6 +461,7 @@ async function request<T>(
         problem?.retryable ??
           (response.status === 429 || response.status >= 500),
         problem?.request_id,
+        problem?.field_errors,
       );
       if (!error.retryable) throw error;
       lastError = error;
@@ -509,6 +525,7 @@ export class ZeusApi {
     workflow: Workflow,
     body: RunRequest,
     idempotencyKey: string,
+    estimateQuoteId?: string,
   ): Promise<RunResponse> {
     return decodeRun(
       await request<unknown>(
@@ -517,7 +534,12 @@ export class ZeusApi {
         {
           method: "POST",
           body: JSON.stringify(body),
-          headers: { "Idempotency-Key": idempotencyKey },
+          headers: {
+            "Idempotency-Key": idempotencyKey,
+            ...(estimateQuoteId
+              ? { "Estimate-Quote-Id": estimateQuoteId }
+              : {}),
+          },
         },
       ),
     );

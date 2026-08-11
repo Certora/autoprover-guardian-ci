@@ -22,10 +22,16 @@ describe("published v2 documentation", () => {
   });
 
   it("documents Bearer v2 behavior and no progress endpoint", () => {
+    const normalizedReadme = readme.replace(/\s+/g, " ");
     expect(readme).toContain("public `/v2` run API");
-    expect(readme).toContain("There is no separate\nprogress endpoint");
+    expect(normalizedReadme).toContain(
+      "There is no separate progress endpoint",
+    );
     expect(readme).toContain("`Idempotency-Key`");
+    expect(readme).toContain("`Estimate-Quote-Id`");
     expect(readme).toContain("polls `GET /v2/runs/{run_id}`");
+    expect(readme).toContain("`source_revision_not_found`");
+    expect(readme).toContain("`contract_not_found`");
     expect(readme).not.toContain("/api/v1");
     expect(readme).not.toContain("X-API-Key");
     expect(readme).toContain("https://app.certora.com");

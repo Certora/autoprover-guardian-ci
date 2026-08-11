@@ -170,6 +170,29 @@ describe("ZeusApi v2", () => {
     ).not.toBe(key);
   });
 
+  it("forwards an AISS estimate quote without changing the launch body", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ request_id: "req-1", run }), {
+        status: 202,
+      }),
+    );
+    const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+    const quoteId = "22222222-2222-4222-8222-222222222222";
+
+    await api.createRun("auto-prover", body, "stable-key", quoteId);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://zeus.certora.com/v2/auto-prover-runs",
+      expect.objectContaining({
+        body: JSON.stringify(body),
+        headers: expect.objectContaining({
+          "Idempotency-Key": "stable-key",
+          "Estimate-Quote-Id": quoteId,
+        }),
+      }),
+    );
+  });
+
   it.each<[Workflow, string]>([
     ["ai-auditor-full", "/v2/ai-auditor-full-runs"],
     ["ai-auditor-diff", "/v2/ai-auditor-diff-runs"],
@@ -470,4 +493,47 @@ describe("ZeusApi v2", () => {
       "required by this workflow",
     );
   });
+
+  it.each([
+    ["source_revision_not_found", "source.commit_sha", "pull request commit"],
+    ["contract_not_found", "contract.path", "contract-path"],
+  ])(
+    "preserves and explains the non-retryable %s response",
+    async (code, field, guidance) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            type: `https://zeus.certora.com/problems/${code}`,
+            title: "Source validation failed",
+            status: 422,
+            detail: "The requested source input could not be resolved.",
+            code,
+            request_id: "req-source",
+            retryable: false,
+            field_errors: {
+              [field]: ["The requested source input could not be resolved."],
+            },
+          }),
+          { status: 422 },
+        ),
+      );
+      const api = new ZeusApi("https://zeus.certora.com", "certora_test");
+
+      const error = await api
+        .estimateRun("auto-prover", body)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code,
+        statusCode: 422,
+        retryable: false,
+        requestId: "req-source",
+        fieldErrors: {
+          [field]: ["The requested source input could not be resolved."],
+        },
+      });
+      expect(getZeusApiErrorMessage(error as ZeusApiError)).toContain(guidance);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
 });
