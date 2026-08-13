@@ -1,7 +1,7 @@
 export type Severity = "HIGH" | "MEDIUM" | "LOW" | "INFO";
-export type Workflow = "ai-auditor-full" | "ai-auditor-diff" | "ai-auditor-finding-validation" | "auto-prover" | "auto-foundry";
-export type RunType = "ai_auditor_full" | "ai_auditor_diff" | "ai_auditor_finding_validation" | "auto_prover" | "auto_foundry";
-export type Engine = "ai-auditor" | "auto-prover" | "auto-foundry";
+export type Workflow = "ai-auditor-full" | "ai-auditor-diff" | "ai-auditor-finding-validation" | "auto-prover" | "auto-fuzzer";
+export type RunType = "ai_auditor_full" | "ai_auditor_diff" | "ai_auditor_finding_validation" | "auto_prover" | "auto_fuzzer";
+export type Engine = "ai-auditor" | "auto-prover" | "auto-fuzzer";
 export type RunStatus = "queued" | "running" | "finalizing" | "succeeded" | "failed" | "cancelling" | "cancelled";
 export type BillingStatus = "reserved" | "metering" | "releasing" | "settled";
 export type RepositoryAuthentication = {
@@ -231,7 +231,7 @@ export type RunResult = {
 } | {
     schema_version: "1";
     run_id: string;
-    run_type: "auto_prover" | "auto_foundry";
+    run_type: "auto_prover" | "auto_fuzzer";
     data: StandaloneResultData;
 };
 export type RunResultResponse = {
@@ -298,7 +298,7 @@ export type FindingValidationActionConfig = CommonActionConfig & {
     skipSubmodules: boolean;
 };
 export type StandaloneActionConfig = CommonActionConfig & {
-    workflow: "auto-prover" | "auto-foundry";
+    workflow: "auto-prover" | "auto-fuzzer";
     contractPath: string;
     contractName: string;
     designDocPath?: string;

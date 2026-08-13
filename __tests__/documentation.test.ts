@@ -11,7 +11,7 @@ describe("published v2 documentation", () => {
       "ai-auditor-diff",
       "ai-auditor-finding-validation",
       "auto-prover",
-      "auto-foundry",
+      "auto-fuzzer",
     ]) {
       expect(readme).toContain(`\`${workflow}\``);
       expect(action).toContain(workflow);

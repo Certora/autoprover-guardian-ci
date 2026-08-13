@@ -18,9 +18,9 @@ export declare function formatFindingValidationPrComment(args: {
     parsed: FindingValidationReport | null;
 }): string;
 export declare function isFailingStandaloneOutcome(outcome: AissRunOutcome): boolean;
-export declare function getStandaloneWarnings(report: AissRunReport, engine?: "auto-prover" | "auto-foundry"): string[];
+export declare function getStandaloneWarnings(report: AissRunReport, engine?: "auto-prover" | "auto-fuzzer"): string[];
 export declare function formatStandalonePrComment(args: {
-    workflow: "auto-prover" | "auto-foundry";
+    workflow: "auto-prover" | "auto-fuzzer";
     runId: string;
     cost: number | null;
     report: AissRunReport;

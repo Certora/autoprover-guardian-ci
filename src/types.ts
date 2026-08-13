@@ -5,16 +5,16 @@ export type Workflow =
   | "ai-auditor-diff"
   | "ai-auditor-finding-validation"
   | "auto-prover"
-  | "auto-foundry";
+  | "auto-fuzzer";
 
 export type RunType =
   | "ai_auditor_full"
   | "ai_auditor_diff"
   | "ai_auditor_finding_validation"
   | "auto_prover"
-  | "auto_foundry";
+  | "auto_fuzzer";
 
-export type Engine = "ai-auditor" | "auto-prover" | "auto-foundry";
+export type Engine = "ai-auditor" | "auto-prover" | "auto-fuzzer";
 
 export type RunStatus =
   | "queued"
@@ -276,7 +276,7 @@ export type RunResult =
   | {
       schema_version: "1";
       run_id: string;
-      run_type: "auto_prover" | "auto_foundry";
+      run_type: "auto_prover" | "auto_fuzzer";
       data: StandaloneResultData;
     };
 
@@ -345,7 +345,7 @@ export type FindingValidationActionConfig = CommonActionConfig & {
 };
 
 export type StandaloneActionConfig = CommonActionConfig & {
-  workflow: "auto-prover" | "auto-foundry";
+  workflow: "auto-prover" | "auto-fuzzer";
   contractPath: string;
   contractName: string;
   designDocPath?: string;
@@ -358,7 +358,7 @@ export type ActionConfig =
   | StandaloneActionConfig;
 
 export function workflowEngine(workflow: Workflow): Engine {
-  if (workflow === "auto-prover" || workflow === "auto-foundry") {
+  if (workflow === "auto-prover" || workflow === "auto-fuzzer") {
     return workflow;
   }
   return "ai-auditor";
@@ -371,5 +371,5 @@ export function workflowRunType(workflow: Workflow): RunType {
     return "ai_auditor_finding_validation";
   }
   if (workflow === "auto-prover") return "auto_prover";
-  return "auto_foundry";
+  return "auto_fuzzer";
 }

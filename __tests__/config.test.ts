@@ -171,8 +171,8 @@ describe("getConfig v2", () => {
     },
   );
 
-  it("rejects threat models for AutoFoundry", () => {
-    inputs.set("workflow", "auto-foundry");
+  it("rejects threat models for AutoFuzzer", () => {
+    inputs.set("workflow", "auto-fuzzer");
     inputs.set("contract-path", "src/Vault.sol");
     inputs.set("contract-name", "Vault");
     inputs.set("threat-model-path", "docs/threat.md");

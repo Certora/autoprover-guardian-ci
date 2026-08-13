@@ -20,7 +20,7 @@ const VALID_WORKFLOWS = new Set<string>([
   "ai-auditor-diff",
   "ai-auditor-finding-validation",
   "auto-prover",
-  "auto-foundry",
+  "auto-fuzzer",
 ]);
 const SOLIDITY_IDENTIFIER_REGEX = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const DOCUMENT_EXTENSIONS = new Set(["md", "markdown", "pdf"]);
@@ -131,7 +131,7 @@ function parseWorkflow(input: string): Workflow {
   const workflow = input || "ai-auditor-diff";
   if (!VALID_WORKFLOWS.has(workflow)) {
     throw new Error(
-      'workflow must be "ai-auditor-full", "ai-auditor-diff", "ai-auditor-finding-validation", "auto-prover", or "auto-foundry".',
+      'workflow must be "ai-auditor-full", "ai-auditor-diff", "ai-auditor-finding-validation", "auto-prover", or "auto-fuzzer".',
     );
   }
   return workflow as Workflow;
@@ -232,7 +232,7 @@ export function getConfig(): ActionConfig {
   }
   const repositoryPrivate = repositoryPrivateValue;
   const workflow = parseWorkflow(core.getInput("workflow"));
-  if (workflow === "auto-prover" || workflow === "auto-foundry") {
+  if (workflow === "auto-prover" || workflow === "auto-fuzzer") {
     const baseRepository = pr.base?.repo?.full_name;
     const headRepository = pr.head?.repo?.full_name;
     if (
@@ -241,7 +241,7 @@ export function getConfig(): ActionConfig {
       baseRepository.toLowerCase() !== headRepository.toLowerCase()
     ) {
       throw new Error(
-        "AutoProver and AutoFoundry require a same-repository pull request; fork pull requests cannot receive generated files.",
+        "AutoProver and AutoFuzzer require a same-repository pull request; fork pull requests cannot receive generated files.",
       );
     }
   }
@@ -279,7 +279,7 @@ export function getConfig(): ActionConfig {
     ].join(":"),
   };
 
-  if (workflow === "auto-prover" || workflow === "auto-foundry") {
+  if (workflow === "auto-prover" || workflow === "auto-fuzzer") {
     const contractPath = validateRepositoryPath(
       core.getInput("contract-path"),
       "contract-path",
@@ -310,7 +310,7 @@ export function getConfig(): ActionConfig {
       core.getInput("threat-model-path"),
       "threat-model-path",
     );
-    if (workflow === "auto-foundry" && threatModelPath) {
+    if (workflow === "auto-fuzzer" && threatModelPath) {
       throw new Error("threat-model-path is only supported by auto-prover.");
     }
 

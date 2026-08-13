@@ -130,9 +130,9 @@ describe("standalone workflow formatting", () => {
     expect(body).toContain("**Run:** `run-1`");
   });
 
-  it("translates report vocabulary for AutoFoundry", () => {
+  it("translates report vocabulary for AutoFuzzer", () => {
     const body = formatStandalonePrComment({
-      workflow: "auto-foundry",
+      workflow: "auto-fuzzer",
       runId: "run-1",
       cost: 1,
       report: { ...report, outcome: "issues_found" },
@@ -146,7 +146,7 @@ describe("standalone workflow formatting", () => {
         },
       },
     });
-    expect(body).toContain("AutoFoundry Results — Test failures found");
+    expect(body).toContain("AutoFuzzer Results — Test failures found");
     expect(body).toContain("Test objectives");
     expect(body).toContain("Not needed (head unchanged)");
   });

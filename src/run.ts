@@ -90,7 +90,7 @@ function isStandaloneConfig(
   config: ActionConfig,
 ): config is StandaloneActionConfig {
   return (
-    config.workflow === "auto-prover" || config.workflow === "auto-foundry"
+    config.workflow === "auto-prover" || config.workflow === "auto-fuzzer"
   );
 }
 
@@ -411,7 +411,7 @@ function validateResultIdentity(
   if (isStandaloneConfig(config)) {
     if (
       result.run_type !== "auto_prover" &&
-      result.run_type !== "auto_foundry"
+      result.run_type !== "auto_fuzzer"
     ) {
       throw new Error("Certora returned a result for a different workflow.");
     }
@@ -530,7 +530,7 @@ async function publishStandaloneResult(args: {
   validateResultIdentity(resultResponse.result, runId, config);
   if (
     resultResponse.result.run_type !== "auto_prover" &&
-    resultResponse.result.run_type !== "auto_foundry"
+    resultResponse.result.run_type !== "auto_fuzzer"
   ) {
     throw new Error("Standalone workflow returned an AI Auditor result.");
   }
@@ -605,8 +605,8 @@ async function publishStandaloneResult(args: {
 
   if (isFailingStandaloneOutcome(report.outcome)) {
     core.setFailed(
-      config.workflow === "auto-foundry"
-        ? "auto-foundry found one or more failing generated tests."
+      config.workflow === "auto-fuzzer"
+        ? "auto-fuzzer found one or more failing generated tests."
         : "auto-prover found one or more violated properties or rules.",
     );
   }

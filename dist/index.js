@@ -30085,7 +30085,7 @@ const RUN_TYPES = new Set([
     "ai_auditor_diff",
     "ai_auditor_finding_validation",
     "auto_prover",
-    "auto_foundry",
+    "auto_fuzzer",
 ]);
 const RUN_STATUSES = new Set([
     "queued",
@@ -30253,7 +30253,7 @@ function decodeResult(value) {
         !isPublicReport(result.data.report)) {
         invalidResponse("malformed finding-validation report");
     }
-    if ((result.run_type === "auto_prover" || result.run_type === "auto_foundry") &&
+    if ((result.run_type === "auto_prover" || result.run_type === "auto_fuzzer") &&
         (!isRecord(result.data.contract) ||
             typeof result.data.contract.path !== "string" ||
             typeof result.data.contract.name !== "string" ||
@@ -30293,7 +30293,7 @@ const WORKFLOW_COLLECTIONS = {
     "ai-auditor-diff": "/v2/ai-auditor-diff-runs",
     "ai-auditor-finding-validation": "/v2/ai-auditor-finding-validations-runs",
     "auto-prover": "/v2/auto-prover-runs",
-    "auto-foundry": "/v2/auto-foundry-runs",
+    "auto-fuzzer": "/v2/auto-fuzzer-runs",
 };
 function workflowCollection(workflow) {
     return WORKFLOW_COLLECTIONS[workflow];
@@ -30471,7 +30471,7 @@ const VALID_WORKFLOWS = new Set([
     "ai-auditor-diff",
     "ai-auditor-finding-validation",
     "auto-prover",
-    "auto-foundry",
+    "auto-fuzzer",
 ]);
 const SOLIDITY_IDENTIFIER_REGEX = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const DOCUMENT_EXTENSIONS = new Set(["md", "markdown", "pdf"]);
@@ -30561,7 +30561,7 @@ function validateApiBaseUrl(input) {
 function parseWorkflow(input) {
     const workflow = input || "ai-auditor-diff";
     if (!VALID_WORKFLOWS.has(workflow)) {
-        throw new Error('workflow must be "ai-auditor-full", "ai-auditor-diff", "ai-auditor-finding-validation", "auto-prover", or "auto-foundry".');
+        throw new Error('workflow must be "ai-auditor-full", "ai-auditor-diff", "ai-auditor-finding-validation", "auto-prover", or "auto-fuzzer".');
     }
     return workflow;
 }
@@ -30631,13 +30631,13 @@ function getConfig() {
     }
     const repositoryPrivate = repositoryPrivateValue;
     const workflow = parseWorkflow(core.getInput("workflow"));
-    if (workflow === "auto-prover" || workflow === "auto-foundry") {
+    if (workflow === "auto-prover" || workflow === "auto-fuzzer") {
         const baseRepository = pr.base?.repo?.full_name;
         const headRepository = pr.head?.repo?.full_name;
         if (!baseRepository ||
             !headRepository ||
             baseRepository.toLowerCase() !== headRepository.toLowerCase()) {
-            throw new Error("AutoProver and AutoFoundry require a same-repository pull request; fork pull requests cannot receive generated files.");
+            throw new Error("AutoProver and AutoFuzzer require a same-repository pull request; fork pull requests cannot receive generated files.");
         }
     }
     const common = {
@@ -30660,7 +30660,7 @@ function getConfig() {
             headSha,
         ].join(":"),
     };
-    if (workflow === "auto-prover" || workflow === "auto-foundry") {
+    if (workflow === "auto-prover" || workflow === "auto-fuzzer") {
         const contractPath = validateRepositoryPath(core.getInput("contract-path"), "contract-path", true);
         if (!contractPath.endsWith(".sol")) {
             throw new Error("contract-path must point to a .sol file.");
@@ -30677,7 +30677,7 @@ function getConfig() {
         }
         const designDocPath = validateDocumentPath(core.getInput("design-doc-path"), "design-doc-path");
         const threatModelPath = validateDocumentPath(core.getInput("threat-model-path"), "threat-model-path");
-        if (workflow === "auto-foundry" && threatModelPath) {
+        if (workflow === "auto-fuzzer" && threatModelPath) {
             throw new Error("threat-model-path is only supported by auto-prover.");
         }
         return {
@@ -30971,10 +30971,10 @@ function formatFindingValidationPrComment(args) {
     return truncateReport(body, 60_000);
 }
 function engineDisplayName(engine) {
-    return engine === "auto-prover" ? "AutoProver" : "AutoFoundry";
+    return engine === "auto-prover" ? "AutoProver" : "AutoFuzzer";
 }
 function outcomeLabel(outcome, engine) {
-    if (engine === "auto-foundry") {
+    if (engine === "auto-fuzzer") {
         if (outcome === "verified")
             return "Tests passed";
         if (outcome === "verified_with_gaps")
@@ -30995,7 +30995,7 @@ function outcomeLabel(outcome, engine) {
         return "Partial";
     return "Unknown";
 }
-function autoFoundryStatusLabel(status) {
+function autoFuzzerStatusLabel(status) {
     const normalized = status.trim().toUpperCase();
     if (["GOOD", "VERIFIED", "PASS", "PASSED", "SUCCESS"].includes(normalized)) {
         return "PASSED";
@@ -31009,7 +31009,7 @@ function isFailingStandaloneOutcome(outcome) {
     return outcome === "issues_found";
 }
 function getStandaloneWarnings(report, engine = "auto-prover") {
-    const isFoundry = engine === "auto-foundry";
+    const isFoundry = engine === "auto-fuzzer";
     const warnings = [];
     if (report.outcome === "partial") {
         warnings.push(isFoundry
@@ -31062,7 +31062,7 @@ function formatStandalonePrComment(args) {
     const warnings = getStandaloneWarnings(args.report, args.workflow);
     const generatedPaths = args.commit.delivery.files.map((file) => file.path);
     const commitCreated = args.commit.delivery.status === "committed";
-    const isFoundry = args.workflow === "auto-foundry";
+    const isFoundry = args.workflow === "auto-fuzzer";
     const outcomeText = outcomeLabel(outcome, args.workflow);
     const firstCountLabel = isFoundry ? "Test objectives" : "Properties";
     const secondCountLabel = isFoundry ? "Generated tests" : "Rules";
@@ -31087,7 +31087,7 @@ function formatStandalonePrComment(args) {
     if (args.report.rule_counts.length > 0) {
         body += `\n### ${isFoundry ? "Test results" : "Rule results"}\n\n| Status | Count |\n|--------|-------|\n`;
         for (const count of args.report.rule_counts) {
-            body += `| ${isFoundry ? autoFoundryStatusLabel(count.status) : count.status} | ${count.count} |\n`;
+            body += `| ${isFoundry ? autoFuzzerStatusLabel(count.status) : count.status} | ${count.count} |\n`;
         }
     }
     if (warnings.length > 0) {
@@ -31495,7 +31495,7 @@ function sourceAuthentication(config) {
         : { type: "public" };
 }
 function isStandaloneConfig(config) {
-    return (config.workflow === "auto-prover" || config.workflow === "auto-foundry");
+    return (config.workflow === "auto-prover" || config.workflow === "auto-fuzzer");
 }
 function isFindingValidationConfig(config) {
     return config.workflow === "ai-auditor-finding-validation";
@@ -31754,7 +31754,7 @@ function validateResultIdentity(result, runId, config) {
     }
     if (isStandaloneConfig(config)) {
         if (result.run_type !== "auto_prover" &&
-            result.run_type !== "auto_foundry") {
+            result.run_type !== "auto_fuzzer") {
             throw new Error("Certora returned a result for a different workflow.");
         }
         if (result.data.contract.path !== config.contractPath ||
@@ -31828,7 +31828,7 @@ async function publishStandaloneResult(args) {
     const resultResponse = await api.getResult(runId);
     validateResultIdentity(resultResponse.result, runId, config);
     if (resultResponse.result.run_type !== "auto_prover" &&
-        resultResponse.result.run_type !== "auto_foundry") {
+        resultResponse.result.run_type !== "auto_fuzzer") {
         throw new Error("Standalone workflow returned an AI Auditor result.");
     }
     const report = readStandaloneReport(resultResponse.result.data.report);
@@ -31873,8 +31873,8 @@ async function publishStandaloneResult(args) {
         }), (0, constants_1.prCommentMarker)(config.workflow));
     }
     if ((0, format_1.isFailingStandaloneOutcome)(report.outcome)) {
-        core.setFailed(config.workflow === "auto-foundry"
-            ? "auto-foundry found one or more failing generated tests."
+        core.setFailed(config.workflow === "auto-fuzzer"
+            ? "auto-fuzzer found one or more failing generated tests."
             : "auto-prover found one or more violated properties or rules.");
     }
 }
@@ -32142,7 +32142,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.workflowEngine = workflowEngine;
 exports.workflowRunType = workflowRunType;
 function workflowEngine(workflow) {
-    if (workflow === "auto-prover" || workflow === "auto-foundry") {
+    if (workflow === "auto-prover" || workflow === "auto-fuzzer") {
         return workflow;
     }
     return "ai-auditor";
@@ -32157,7 +32157,7 @@ function workflowRunType(workflow) {
     }
     if (workflow === "auto-prover")
         return "auto_prover";
-    return "auto_foundry";
+    return "auto_fuzzer";
 }
 
 

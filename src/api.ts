@@ -144,7 +144,7 @@ const RUN_TYPES = new Set([
   "ai_auditor_diff",
   "ai_auditor_finding_validation",
   "auto_prover",
-  "auto_foundry",
+  "auto_fuzzer",
 ]);
 const RUN_STATUSES = new Set([
   "queued",
@@ -335,7 +335,7 @@ function decodeResult(value: unknown): RunResultResponse {
     invalidResponse("malformed finding-validation report");
   }
   if (
-    (result.run_type === "auto_prover" || result.run_type === "auto_foundry") &&
+    (result.run_type === "auto_prover" || result.run_type === "auto_fuzzer") &&
     (!isRecord(result.data.contract) ||
       typeof result.data.contract.path !== "string" ||
       typeof result.data.contract.name !== "string" ||
@@ -384,7 +384,7 @@ const WORKFLOW_COLLECTIONS: Record<Workflow, string> = {
   "ai-auditor-diff": "/v2/ai-auditor-diff-runs",
   "ai-auditor-finding-validation": "/v2/ai-auditor-finding-validations-runs",
   "auto-prover": "/v2/auto-prover-runs",
-  "auto-foundry": "/v2/auto-foundry-runs",
+  "auto-fuzzer": "/v2/auto-fuzzer-runs",
 };
 
 function workflowCollection(workflow: Workflow): string {

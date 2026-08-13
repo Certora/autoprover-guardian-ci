@@ -222,15 +222,15 @@ export function formatFindingValidationPrComment(args: {
   return truncateReport(body, 60_000);
 }
 
-function engineDisplayName(engine: "auto-prover" | "auto-foundry"): string {
-  return engine === "auto-prover" ? "AutoProver" : "AutoFoundry";
+function engineDisplayName(engine: "auto-prover" | "auto-fuzzer"): string {
+  return engine === "auto-prover" ? "AutoProver" : "AutoFuzzer";
 }
 
 function outcomeLabel(
   outcome: AissRunOutcome,
-  engine: "auto-prover" | "auto-foundry",
+  engine: "auto-prover" | "auto-fuzzer",
 ): string {
-  if (engine === "auto-foundry") {
+  if (engine === "auto-fuzzer") {
     if (outcome === "verified") return "Tests passed";
     if (outcome === "verified_with_gaps") return "Tests passed with gaps";
     if (outcome === "issues_found") return "Test failures found";
@@ -244,7 +244,7 @@ function outcomeLabel(
   return "Unknown";
 }
 
-function autoFoundryStatusLabel(status: string): string {
+function autoFuzzerStatusLabel(status: string): string {
   const normalized = status.trim().toUpperCase();
   if (["GOOD", "VERIFIED", "PASS", "PASSED", "SUCCESS"].includes(normalized)) {
     return "PASSED";
@@ -261,9 +261,9 @@ export function isFailingStandaloneOutcome(outcome: AissRunOutcome): boolean {
 
 export function getStandaloneWarnings(
   report: AissRunReport,
-  engine: "auto-prover" | "auto-foundry" = "auto-prover",
+  engine: "auto-prover" | "auto-fuzzer" = "auto-prover",
 ): string[] {
-  const isFoundry = engine === "auto-foundry";
+  const isFoundry = engine === "auto-fuzzer";
   const warnings: string[] = [];
 
   if (report.outcome === "partial") {
@@ -331,7 +331,7 @@ export function getStandaloneWarnings(
 }
 
 export function formatStandalonePrComment(args: {
-  workflow: "auto-prover" | "auto-foundry";
+  workflow: "auto-prover" | "auto-fuzzer";
   runId: string;
   cost: number | null;
   report: AissRunReport;
@@ -342,7 +342,7 @@ export function formatStandalonePrComment(args: {
   const warnings = getStandaloneWarnings(args.report, args.workflow);
   const generatedPaths = args.commit.delivery.files.map((file) => file.path);
   const commitCreated = args.commit.delivery.status === "committed";
-  const isFoundry = args.workflow === "auto-foundry";
+  const isFoundry = args.workflow === "auto-fuzzer";
   const outcomeText = outcomeLabel(outcome, args.workflow);
   const firstCountLabel = isFoundry ? "Test objectives" : "Properties";
   const secondCountLabel = isFoundry ? "Generated tests" : "Rules";
@@ -370,7 +370,7 @@ export function formatStandalonePrComment(args: {
   if (args.report.rule_counts.length > 0) {
     body += `\n### ${isFoundry ? "Test results" : "Rule results"}\n\n| Status | Count |\n|--------|-------|\n`;
     for (const count of args.report.rule_counts) {
-      body += `| ${isFoundry ? autoFoundryStatusLabel(count.status) : count.status} | ${count.count} |\n`;
+      body += `| ${isFoundry ? autoFuzzerStatusLabel(count.status) : count.status} | ${count.count} |\n`;
     }
   }
 

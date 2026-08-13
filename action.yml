@@ -1,5 +1,5 @@
 name: "AutoProver Guardian CI"
-description: "Run AI Auditor reviews and finding validations, AutoProver, or AutoFoundry on pull requests"
+description: "Run AI Auditor reviews and finding validations, AutoProver, or AutoFuzzer on pull requests"
 author: "Certora"
 
 branding:
@@ -12,7 +12,7 @@ inputs:
     required: true
 
   workflow:
-    description: 'Workflow to run: "ai-auditor-full", "ai-auditor-diff", "ai-auditor-finding-validation", "auto-prover", or "auto-foundry"'
+    description: 'Workflow to run: "ai-auditor-full", "ai-auditor-diff", "ai-auditor-finding-validation", "auto-prover", or "auto-fuzzer"'
     required: false
     default: "ai-auditor-diff"
 
@@ -93,15 +93,15 @@ inputs:
     default: "ai-auditor,security"
 
   contract-path:
-    description: "AutoProver/AutoFoundry only: repository-relative path to one Solidity contract"
+    description: "AutoProver/AutoFuzzer only: repository-relative path to one Solidity contract"
     required: false
 
   contract-name:
-    description: "AutoProver/AutoFoundry only: contract declaration name"
+    description: "AutoProver/AutoFuzzer only: contract declaration name"
     required: false
 
   design-doc-path:
-    description: "AutoProver/AutoFoundry only: optional repository-relative .md, .markdown, or .pdf design document"
+    description: "AutoProver/AutoFuzzer only: optional repository-relative .md, .markdown, or .pdf design document"
     required: false
 
   threat-model-path:
@@ -134,10 +134,10 @@ outputs:
     description: "Workflow selected for this run"
 
   run-outcome:
-    description: "AutoProver verification or AutoFoundry test outcome (verified, verified_with_gaps, partial, issues_found, or unknown)"
+    description: "AutoProver verification or AutoFuzzer test outcome (verified, verified_with_gaps, partial, issues_found, or unknown)"
 
   generated-files:
-    description: "Comma-separated repository paths committed by AutoProver/AutoFoundry"
+    description: "Comma-separated repository paths committed by AutoProver/AutoFuzzer"
 
   generated-commit-sha:
     description: "Commit containing generated files; empty when no commit was needed"

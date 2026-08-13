@@ -6,7 +6,7 @@ AutoProver Guardian CI runs one Certora workflow for every pull request:
 - `ai-auditor-diff` (default)
 - `ai-auditor-finding-validation`
 - `auto-prover`
-- `auto-foundry`
+- `auto-fuzzer`
 
 The action uses the public `/v2` run API. It estimates each run before launch,
 submits launches with a deterministic `Idempotency-Key`, forwards the optional
@@ -20,7 +20,7 @@ separate progress endpoint.
 Create an organization API key with the required run scopes in the Certora
 dashboard, then save it as a repository secret named `CERTORA_API_KEY`.
 Guardian needs `runs:create` and `runs:read`; grant `runs:cancel` for timeout
-cancellation and `generated_files:write` for AutoProver or AutoFoundry delivery.
+cancellation and `generated_files:write` for AutoProver or AutoFuzzer delivery.
 
 ```yaml
 name: Certora security
@@ -55,7 +55,7 @@ Public repositories are launched with `source.authentication.type: public`.
 Private repositories use `organization_github_app`; connect the Certora GitHub
 App to the organization and grant it access to the repository first.
 
-AutoProver and AutoFoundry also require the organization GitHub App to write
+AutoProver and AutoFuzzer also require the organization GitHub App to write
 generated files. Guardian binds the pull request number at launch and calls the
 empty-body `/v2/runs/{run_id}/generated-files/commit` endpoint only after the
 run succeeds. Fork pull requests are rejected for these two workflows.
@@ -116,13 +116,13 @@ output in a later workflow step when repository policy should fail on it.
     threat-model-path: docs/vault-threat-model.md
 ```
 
-### AutoFoundry
+### AutoFuzzer
 
 ```yaml
 - uses: Certora/autoprover-guardian-ci@v2
   with:
     api-key: ${{ secrets.CERTORA_API_KEY }}
-    workflow: auto-foundry
+    workflow: auto-fuzzer
     contract-path: src/Vault.sol
     contract-name: Vault
     design-doc-path: docs/vault-design.md
@@ -169,7 +169,7 @@ statuses are `queued`, `running`, `finalizing`, `succeeded`, `failed`,
 `cancelling`, and `cancelled`. A succeeded run guarantees that its result is
 ready and billing is settled.
 
-For AutoProver and AutoFoundry, estimate and launch resolve the exact remote
+For AutoProver and AutoFuzzer, estimate and launch resolve the exact remote
 commit and `contract-path` before issuing a quote or reserving balance. An
 unavailable commit returns `source_revision_not_found`; a missing or unreadable
 contract returns `contract_not_found`. Guardian reports both as terminal input
@@ -214,7 +214,7 @@ errors, so correcting the repository access or path and rerunning is safe.
 | `lows-count`           | AI Auditor LOW finding count                       |
 | `infos-count`          | AI Auditor INFO finding count                      |
 | `issues-created`       | Comma-separated created or reused issue references |
-| `run-outcome`          | AutoProver or AutoFoundry report outcome           |
+| `run-outcome`          | AutoProver or AutoFuzzer report outcome            |
 | `generated-files`      | Comma-separated generated repository paths         |
 | `generated-commit-sha` | Generated commit SHA, or empty for `no_changes`    |
 | `validation-verdict`   | Finding validation verdict (`VALID` or `INVALID`)  |

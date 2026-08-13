@@ -201,7 +201,7 @@ describe("AutoProverApi v2", () => {
       "/v2/ai-auditor-finding-validations-runs",
     ],
     ["auto-prover", "/v2/auto-prover-runs"],
-    ["auto-foundry", "/v2/auto-foundry-runs"],
+    ["auto-fuzzer", "/v2/auto-fuzzer-runs"],
   ])("uses the dedicated %s launch collection", async (workflow, path) => {
     const workflowRun = { ...run, run_type: workflowRunType(workflow) };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
@@ -217,9 +217,7 @@ describe("AutoProverApi v2", () => {
       `certora-guardian-${workflow}`,
     );
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      `https://app.certora.com${path}`,
-    );
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`https://app.certora.com${path}`);
   });
 
   it("safely retries an idempotent launch after a retryable failure", async () => {
@@ -532,7 +530,9 @@ describe("AutoProverApi v2", () => {
           [field]: ["The requested source input could not be resolved."],
         },
       });
-      expect(getAutoProverApiErrorMessage(error as AutoProverApiError)).toContain(guidance);
+      expect(
+        getAutoProverApiErrorMessage(error as AutoProverApiError),
+      ).toContain(guidance);
       expect(fetchMock).toHaveBeenCalledTimes(1);
     },
   );

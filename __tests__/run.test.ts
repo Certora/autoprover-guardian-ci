@@ -96,7 +96,7 @@ function aiConfig(
 }
 
 function standaloneConfig(
-  workflow: "auto-prover" | "auto-foundry" = "auto-prover",
+  workflow: "auto-prover" | "auto-fuzzer" = "auto-prover",
 ): StandaloneActionConfig {
   return {
     workflow,
@@ -201,7 +201,7 @@ function runResource(
           }
         : null,
     delivery:
-      workflow === "auto-prover" || workflow === "auto-foundry"
+      workflow === "auto-prover" || workflow === "auto-fuzzer"
         ? {
             type: "github_pull_request",
             pull_request_number: 42,
@@ -257,7 +257,7 @@ function aiResult(workflow: "ai-auditor-full" | "ai-auditor-diff") {
   };
 }
 
-function standaloneResult(workflow: "auto-prover" | "auto-foundry") {
+function standaloneResult(workflow: "auto-prover" | "auto-fuzzer") {
   return {
     request_id: "req-result",
     result: {
