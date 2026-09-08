@@ -16,6 +16,11 @@ inputs:
     required: false
     default: "ai-auditor-diff"
 
+  model-mode:
+    description: 'AI Auditor only (full, diff, and finding validation): model set "normal" or "frontier". Empty uses the server default, Normal; does not change max-iterations.'
+    required: false
+    default: ""
+
   context:
     description: "Required for every AI Auditor workflow: explicit comma-separated glob patterns for files to analyze (maximum 500 characters each)"
     required: false
@@ -132,6 +137,9 @@ outputs:
 
   workflow:
     description: "Workflow selected for this run"
+
+  model-mode:
+    description: "AI Auditor model mode (normal or frontier); empty for other engines or a historical run without a recorded or explicitly requested mode"
 
   run-outcome:
     description: "AutoProver verification or AutoFuzzer test outcome (verified, verified_with_gaps, partial, issues_found, or unknown)"

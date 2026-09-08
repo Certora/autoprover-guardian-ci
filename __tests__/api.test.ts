@@ -193,6 +193,34 @@ describe("AutoProverApi v2", () => {
     );
   });
 
+  it("keeps omitted-mode idempotency stable and distinguishes explicit model modes", () => {
+    const legacy = createIdempotencyKey("ai-auditor-full", body, "stable-seed");
+    expect(createIdempotencyKey("ai-auditor-full", { ...body, model_mode: undefined }, "stable-seed")).toBe(legacy);
+    const normal = createIdempotencyKey("ai-auditor-full", { ...body, model_mode: "normal" }, "stable-seed");
+    const frontier = createIdempotencyKey("ai-auditor-full", { ...body, model_mode: "frontier" }, "stable-seed");
+    expect(frontier).not.toBe(normal);
+    expect(frontier).not.toBe(legacy);
+    expect(createIdempotencyKey("ai-auditor-full", { ...body, model_mode: "frontier" }, "stable-seed")).toBe(frontier);
+  });
+
+  it.each([undefined, null, "normal", "frontier"])("accepts optional recorded model mode %j", async (modelMode) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ request_id: "req-mode", run: { ...run, model_mode: modelMode } }), { status: 200 }),
+    );
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+
+    expect((await api.getRun(run.id)).run.model_mode).toBe(modelMode);
+  });
+
+  it.each(["fast", 1, {}, ""])("rejects invalid recorded model mode %j", async (modelMode) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ request_id: "req-mode", run: { ...run, model_mode: modelMode } }), { status: 200 }),
+    );
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+
+    await expect(api.getRun(run.id)).rejects.toThrow("malformed run");
+  });
+
   it.each<[Workflow, string]>([
     ["ai-auditor-full", "/v2/ai-auditor-full-runs"],
     ["ai-auditor-diff", "/v2/ai-auditor-diff-runs"],

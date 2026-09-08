@@ -5,6 +5,19 @@ const readme = readFileSync("README.md", "utf8");
 const action = readFileSync("action.yml", "utf8");
 
 describe("published v2 documentation", () => {
+  it("documents model modes without changing iteration or omitted-input defaults", () => {
+    const normalizedReadme = readme.replace(/\s+/g, " ");
+    expect(normalizedReadme).toContain("`model-mode` selects the AI Auditor model set: `normal` or `frontier`");
+    expect(normalizedReadme).toContain("six DeepDive iterations by default");
+    expect(normalizedReadme).toContain("still accepts `max-iterations` from 4 through 10");
+    expect(normalizedReadme).toContain("Finding validation supports both model modes but has no DeepDive iterations");
+    expect(normalizedReadme).toContain("Not recorded (legacy run)");
+    const modeInput = action.split("  model-mode:")[1]?.split("\n\n")[0] ?? "";
+    expect(modeInput).toContain('default: ""');
+    const iterationInput = action.split("  max-iterations:")[1]?.split("\n\n")[0] ?? "";
+    expect(iterationInput).toContain('default: "6"');
+  });
+
   it("distinguishes language-independent AI Auditor from Solidity-only engines", () => {
     const normalizedReadme = readme.replace(/\s+/g, " ");
     expect(normalizedReadme).toContain("AI Auditor supports any programming language");

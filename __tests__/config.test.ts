@@ -96,6 +96,48 @@ describe("getConfig v2", () => {
     });
   });
 
+  it("leaves an omitted model mode unset for legacy launch-body compatibility", () => {
+    expect(getConfig()).toMatchObject({ maxIterations: 6 });
+    expect(getConfig()).toHaveProperty("modelMode", undefined);
+  });
+
+  describe.each(["normal", "frontier"])("model-mode %s", (mode) => {
+    it.each(["ai-auditor-full", "ai-auditor-diff"])(
+      "keeps six iterations by default for %s",
+      (workflow) => {
+        inputs.set("workflow", workflow);
+        inputs.set("model-mode", mode);
+        expect(getConfig()).toMatchObject({ modelMode: mode, maxIterations: 6 });
+      },
+    );
+
+    it.each([4, 10])("preserves an explicit %i iteration override", (iterations) => {
+      inputs.set("model-mode", mode);
+      inputs.set("max-iterations", String(iterations));
+      expect(getConfig()).toMatchObject({ modelMode: mode, maxIterations: iterations });
+    });
+
+    it("supports finding validation without adding DeepDive iterations", () => {
+      inputs.set("workflow", "ai-auditor-finding-validation");
+      inputs.set("model-mode", mode);
+      inputs.set("finding", "An authorization check is missing.");
+      const config = getConfig();
+      expect(config).toHaveProperty("modelMode", mode);
+      expect(config).not.toHaveProperty("maxIterations");
+    });
+
+    it.each(["auto-prover", "auto-fuzzer"])("rejects the input for %s", (workflow) => {
+      inputs.set("workflow", workflow);
+      inputs.set("model-mode", mode);
+      expect(() => getConfig()).toThrow("model-mode is only supported by AI Auditor workflows");
+    });
+  });
+
+  it.each(["fast", "Frontier", "normal,frontier"])("rejects model-mode %j", (mode) => {
+    inputs.set("model-mode", mode);
+    expect(() => getConfig()).toThrow('model-mode must be "normal" or "frontier"');
+  });
+
   it("accepts both explicit AI Auditor workflows and custom instructions", () => {
     inputs.set("workflow", "ai-auditor-full");
     inputs.set("instructions", "Focus on authorization.");

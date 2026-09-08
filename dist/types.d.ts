@@ -1,4 +1,5 @@
 export type Severity = "HIGH" | "MEDIUM" | "LOW" | "INFO";
+export type ModelMode = "normal" | "frontier";
 export type Workflow = "ai-auditor-full" | "ai-auditor-diff" | "ai-auditor-finding-validation" | "auto-prover" | "auto-fuzzer";
 export type RunType = "ai_auditor_full" | "ai_auditor_diff" | "ai_auditor_finding_validation" | "auto_prover" | "auto_fuzzer";
 export type Engine = "ai-auditor" | "auto-prover" | "auto-fuzzer";
@@ -25,6 +26,7 @@ export type DiffSource = {
 };
 export type AiAuditorFullRunRequest = {
     source: SingleCommitSource;
+    model_mode?: ModelMode;
     context: string[];
     scope?: string[];
     instructions?: string;
@@ -35,6 +37,7 @@ export type AiAuditorFullRunRequest = {
 };
 export type AiAuditorDiffRunRequest = {
     source: DiffSource;
+    model_mode?: ModelMode;
     context: string[];
     instructions?: string;
     skip_submodules?: boolean;
@@ -43,6 +46,7 @@ export type AiAuditorDiffRunRequest = {
 };
 export type AiAuditorFindingValidationRunRequest = {
     source: SingleCommitSource;
+    model_mode?: ModelMode;
     context: string[];
     finding: string;
     skip_submodules?: boolean;
@@ -89,6 +93,7 @@ export type RunError = {
 export type Run = {
     id: string;
     run_type: RunType;
+    model_mode?: ModelMode | null;
     status: RunStatus;
     source: {
         repository_url: string;
@@ -280,6 +285,7 @@ type CommonActionConfig = {
 };
 export type AiAuditorActionConfig = CommonActionConfig & {
     workflow: "ai-auditor-full" | "ai-auditor-diff";
+    modelMode?: ModelMode;
     context: string[];
     scope?: string[];
     instructions?: string;
@@ -293,6 +299,7 @@ export type AiAuditorActionConfig = CommonActionConfig & {
 };
 export type FindingValidationActionConfig = CommonActionConfig & {
     workflow: "ai-auditor-finding-validation";
+    modelMode?: ModelMode;
     context: string[];
     finding: string;
     skipSubmodules: boolean;

@@ -1,11 +1,12 @@
-import type { Severity } from "./types";
+import type { ModelMode, Severity } from "./types";
 export declare const SEVERITY_ORDER: Record<Severity, number>;
 export declare const SEVERITY_EMOJI: Record<Severity, string>;
 export declare const SEVERITY_LABEL_PREFIX = "ai-auditor:";
 export declare const AI_AUDITOR_LABEL = "ai-auditor";
 export declare const AUTO_PROVER_LABEL = "auto-prover";
 export declare const PR_COMMENT_MARKER = "<!-- autoprover-guardian-ci -->";
-export declare function prCommentMarker(workflow: string): string;
+export declare function prCommentMarker(workflow: string, modelMode?: ModelMode | null): string;
+export declare function modelModeLabel(modelMode?: ModelMode | null): string;
 export declare const DEFAULT_POLL_INTERVAL = 60;
 export declare const DEFAULT_TIMEOUT = 120;
 export declare const DEFAULT_MAX_ITERATIONS = 6;

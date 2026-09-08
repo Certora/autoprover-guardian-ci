@@ -5,6 +5,7 @@ const {
   createIdempotencyKeyMock,
   getConfigMock,
   getGeneratedFollowupMock,
+  infoMock,
   setFailedMock,
   setOutputMock,
   upsertPrCommentMock,
@@ -20,13 +21,14 @@ const {
   createIdempotencyKeyMock: vi.fn(() => "certora-guardian-stable"),
   getConfigMock: vi.fn(),
   getGeneratedFollowupMock: vi.fn(),
+  infoMock: vi.fn(),
   setFailedMock: vi.fn(),
   setOutputMock: vi.fn(),
   upsertPrCommentMock: vi.fn(),
 }));
 
 vi.mock("@actions/core", () => ({
-  info: vi.fn(),
+  info: infoMock,
   warning: vi.fn(),
   setOutput: setOutputMock,
   setFailed: setFailedMock,
@@ -53,6 +55,7 @@ import { buildRunRequest, run } from "../src/run";
 import type {
   AiAuditorActionConfig,
   FindingValidationActionConfig,
+  ModelMode,
   Run,
   StandaloneActionConfig,
   Workflow,
@@ -350,6 +353,112 @@ describe("run v2 orchestration", () => {
       run: runResource("ai-auditor-diff", "cancelling"),
     });
     apiMethods.commitGeneratedFiles.mockResolvedValue(commit);
+  });
+
+  it.each(["ai-auditor-full", "ai-auditor-diff"] as const)(
+    "preserves the legacy %s request when model-mode is omitted",
+    (workflow) => {
+      const config = aiConfig(workflow);
+      const body = buildRunRequest(config);
+      expect(body).not.toHaveProperty("model_mode");
+      expect(body).toHaveProperty("max_iterations", 6);
+      expect(buildRunRequest({ ...config, modelMode: undefined })).toEqual(body);
+    },
+  );
+
+  describe.each(["normal", "frontier"] as const)("model-mode %s", (modelMode) => {
+    it.each(["ai-auditor-full", "ai-auditor-diff"] as const)(
+      "estimates and launches %s with the identical mode and explicit iterations",
+      async (workflow) => {
+        const config = { ...aiConfig(workflow), modelMode, maxIterations: 8, commentOnPr: true };
+        getConfigMock.mockReturnValue(config);
+        apiMethods.createRun.mockResolvedValue({
+          request_id: "req-mode", run: { ...runResource(workflow), model_mode: modelMode },
+        });
+        apiMethods.getResult.mockResolvedValue(aiResult(workflow));
+
+        await run();
+
+        const body = buildRunRequest(config);
+        expect(body).toHaveProperty("model_mode", modelMode);
+        expect(body).toHaveProperty("max_iterations", 8);
+        expect(apiMethods.estimateRun).toHaveBeenCalledWith(workflow, body);
+        expect(apiMethods.createRun).toHaveBeenCalledWith(workflow, body, "certora-guardian-stable", undefined);
+        expect(setOutputMock).toHaveBeenCalledWith("model-mode", modelMode);
+        const label = modelMode === "frontier" ? "Frontier" : "Normal";
+        expect(infoMock).toHaveBeenCalledWith(`Model mode: ${label}`);
+        expect(upsertPrCommentMock).toHaveBeenCalledWith(
+          42, expect.stringContaining(`**Model mode:** ${label}`),
+          `<!-- certora-guardian-ci:${workflow}${modelMode === "frontier" ? ":frontier" : ""} -->`,
+        );
+      },
+    );
+
+    it("forwards mode for finding validation without adding iterations", async () => {
+      const config = { ...findingValidationConfig(), modelMode };
+      getConfigMock.mockReturnValue(config);
+      apiMethods.createRun.mockResolvedValue({
+        request_id: "req-mode", run: { ...runResource(config.workflow), model_mode: modelMode },
+      });
+      apiMethods.getResult.mockResolvedValue(findingValidationResult());
+
+      await run();
+
+      const body = buildRunRequest(config);
+      expect(body).toHaveProperty("model_mode", modelMode);
+      expect(body).not.toHaveProperty("max_iterations");
+      expect(apiMethods.estimateRun).toHaveBeenCalledWith(config.workflow, body);
+      expect(apiMethods.createRun).toHaveBeenCalledWith(config.workflow, body, "certora-guardian-stable", undefined);
+      expect(upsertPrCommentMock).toHaveBeenCalledWith(
+        42, expect.stringContaining(`**Model mode:** ${modelMode === "frontier" ? "Frontier" : "Normal"}`),
+        `<!-- certora-guardian-ci:ai-auditor-finding-validation${modelMode === "frontier" ? ":frontier" : ""} -->`,
+      );
+    });
+  });
+
+  it("does not relabel an unrecorded historical run as Normal", async () => {
+    const config = { ...aiConfig(), commentOnPr: true };
+    getConfigMock.mockReturnValue(config);
+    apiMethods.createRun.mockResolvedValue({
+      request_id: "req-legacy", run: { ...runResource(config.workflow), model_mode: null },
+    });
+    apiMethods.getResult.mockResolvedValue(aiResult(config.workflow));
+
+    await run();
+
+    expect(infoMock).toHaveBeenCalledWith("Model mode: Normal (server default)");
+    expect(setOutputMock).not.toHaveBeenCalledWith("model-mode", "normal");
+    expect(upsertPrCommentMock).toHaveBeenCalledWith(
+      42, expect.stringContaining("**Model mode:** Not recorded (legacy run)"),
+      "<!-- certora-guardian-ci:ai-auditor-diff -->",
+    );
+  });
+
+  it("rejects a conflicting recorded model mode without another launch", async () => {
+    const config = { ...aiConfig(), modelMode: "frontier" as ModelMode };
+    getConfigMock.mockReturnValue(config);
+    apiMethods.createRun.mockResolvedValue({
+      request_id: "req-conflict", run: { ...runResource(config.workflow), model_mode: "normal" },
+    });
+
+    await expect(run()).rejects.toThrow("different model mode");
+    expect(apiMethods.createRun).toHaveBeenCalledTimes(1);
+    expect(apiMethods.getResult).not.toHaveBeenCalled();
+  });
+
+  it("never retries a rejected Frontier estimate without its mode", async () => {
+    const config = { ...aiConfig(), modelMode: "frontier" as ModelMode };
+    getConfigMock.mockReturnValue(config);
+    apiMethods.estimateRun.mockRejectedValue(new Error("model_mode is not supported"));
+
+    await expect(run()).rejects.toThrow("model_mode is not supported");
+    expect(apiMethods.estimateRun).toHaveBeenCalledTimes(1);
+    expect(apiMethods.estimateRun).toHaveBeenCalledWith(config.workflow, expect.objectContaining({ model_mode: "frontier" }));
+    expect(apiMethods.createRun).not.toHaveBeenCalled();
+  });
+
+  it.each(["auto-prover", "auto-fuzzer"] as const)("does not add audit mode to %s requests", (workflow) => {
+    expect(buildRunRequest(standaloneConfig(workflow))).not.toHaveProperty("model_mode");
   });
 
   it("estimates and launches an AI diff run with the identical body", async () => {

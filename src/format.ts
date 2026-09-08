@@ -5,10 +5,11 @@ import type {
   CommitGeneratedFilesResponse,
   Finding,
   FindingValidationReport,
+  ModelMode,
   PublicReport,
   Severity,
 } from "./types";
-import { prCommentMarker, SEVERITY_EMOJI } from "./constants";
+import { modelModeLabel, prCommentMarker, SEVERITY_EMOJI } from "./constants";
 
 export function formatIssueTitle(finding: Finding): string {
   const prefix = `[AI Auditor] ${finding.severity}: `;
@@ -65,6 +66,7 @@ export function formatPrComment(
   issueLinks: { finding: Finding; url: string }[],
   prNumber: number,
   workflow: "ai-auditor-full" | "ai-auditor-diff",
+  modelMode?: ModelMode | null,
 ): string {
   const displayedCost = cost === null ? "unavailable" : `$${cost.toFixed(2)}`;
   const counts = {
@@ -79,15 +81,15 @@ export function formatPrComment(
   let body: string;
 
   if (totalFindings === 0) {
-    body = `${prCommentMarker(workflow)}
+    body = `${prCommentMarker(workflow, modelMode)}
 ## \u2705 AI Auditor Results — No Findings
 
 No security issues were detected in this PR.
 
-**Run:** \`${runId}\` | **Cost:** ${displayedCost}
+**Run:** \`${runId}\` | **Cost:** ${displayedCost} | **Model mode:** ${modelModeLabel(modelMode)}
 `;
   } else {
-    body = `${prCommentMarker(workflow)}
+    body = `${prCommentMarker(workflow, modelMode)}
 ## ${SEVERITY_EMOJI.HIGH} AI Auditor Results
 
 | Severity | Count |
@@ -98,7 +100,7 @@ No security issues were detected in this PR.
 | ${SEVERITY_EMOJI.INFO} INFO | ${counts.INFO} |
 | **Total** | **${totalFindings}** |
 
-**Run:** \`${runId}\` | **Cost:** ${displayedCost}
+**Run:** \`${runId}\` | **Cost:** ${displayedCost} | **Model mode:** ${modelModeLabel(modelMode)}
 `;
   }
 
@@ -151,17 +153,18 @@ export function formatAiAuditorMarkdownPrComment(args: {
   runId: string;
   cost: number | null;
   content: string;
+  modelMode?: ModelMode | null;
 }): string {
   const displayedCost =
     args.cost === null ? "unavailable" : `$${args.cost.toFixed(2)}`;
   const content = truncateReport(args.content, 50_000);
   return truncateReport(
-    `${prCommentMarker(args.workflow)}
+    `${prCommentMarker(args.workflow, args.modelMode)}
 ## AI Auditor Results
 
 ${content}
 
-**Run:** \`${args.runId}\` | **Cost:** ${displayedCost}
+**Run:** \`${args.runId}\` | **Cost:** ${displayedCost} | **Model mode:** ${modelModeLabel(args.modelMode)}
 
 ---
 _Powered by [AI Auditor](https://app.certora.com)_
@@ -182,10 +185,11 @@ export function formatFindingValidationPrComment(args: {
   cost: number | null;
   report: PublicReport;
   parsed: FindingValidationReport | null;
+  modelMode?: ModelMode | null;
 }): string {
   const displayedCost =
     args.cost === null ? "unavailable" : `$${args.cost.toFixed(2)}`;
-  let body = `${prCommentMarker("ai-auditor-finding-validation")}\n## AI Auditor Finding Validation\n\n`;
+  let body = `${prCommentMarker("ai-auditor-finding-validation", args.modelMode)}\n## AI Auditor Finding Validation\n\n`;
 
   if (args.parsed) {
     const verdict =
@@ -217,7 +221,7 @@ export function formatFindingValidationPrComment(args: {
     body += `<details>\n<summary>Unrecognized validation result</summary>\n\n<pre>${escapeHtml(json)}</pre>\n</details>\n`;
   }
 
-  body += `\n**Run:** \`${args.runId}\` | **Cost:** ${displayedCost}\n`;
+  body += `\n**Run:** \`${args.runId}\` | **Cost:** ${displayedCost} | **Model mode:** ${modelModeLabel(args.modelMode)}\n`;
   body += `\n---\n_Powered by [AI Auditor](https://app.certora.com)_\n`;
   return truncateReport(body, 60_000);
 }

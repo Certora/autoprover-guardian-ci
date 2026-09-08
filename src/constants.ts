@@ -1,4 +1,4 @@
-import type { Severity } from "./types";
+import type { ModelMode, Severity } from "./types";
 
 export const SEVERITY_ORDER: Record<Severity, number> = {
   HIGH: 0,
@@ -21,8 +21,17 @@ export const AUTO_PROVER_LABEL = "auto-prover";
 
 export const PR_COMMENT_MARKER = "<!-- autoprover-guardian-ci -->";
 
-export function prCommentMarker(workflow: string): string {
-  return `<!-- certora-guardian-ci:${workflow} -->`;
+export function prCommentMarker(
+  workflow: string,
+  modelMode?: ModelMode | null,
+): string {
+  const modeSuffix = modelMode === "frontier" ? ":frontier" : "";
+  return `<!-- certora-guardian-ci:${workflow}${modeSuffix} -->`;
+}
+
+export function modelModeLabel(modelMode: ModelMode | null = "normal"): string {
+  if (modelMode === null) return "Not recorded (legacy run)";
+  return modelMode === "frontier" ? "Frontier" : "Normal";
 }
 
 export const DEFAULT_POLL_INTERVAL = 60;

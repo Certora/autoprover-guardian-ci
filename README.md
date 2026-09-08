@@ -79,6 +79,37 @@ runs. Context may mix source languages, shared libraries, resources, and relevan
 build manifests (for example `src/**/*.py,web/**/*.ts,lib/**,pyproject.toml`).
 Only AutoProver and AutoFuzzer require Solidity contracts.
 
+### AI Auditor model modes
+
+`model-mode` selects the AI Auditor model set: `normal` or `frontier`. Normal
+is the server default; Frontier uses the frontier model set throughout the
+auditor pipeline, with the configured Luna helper unchanged. Both modes use
+six DeepDive iterations by default. Model selection and iteration count are
+independent: the action/API still accepts `max-iterations` from 4 through 10.
+Finding validation supports both model modes but has no DeepDive iterations.
+
+Leave `model-mode` empty to use Normal without changing existing launch bodies
+or idempotency keys. An explicit selection is forwarded as `model_mode` in
+both estimate and launch, so the cost estimate uses that same mode. Guardian
+never retries by removing or downgrading the requested mode. AutoProver and
+AutoFuzzer reject this AI Auditor-only input.
+
+Startup logs show the requested/default mode. PR summaries show the recorded
+mode, or an explicitly requested mode when the server does not report one.
+Historical runs with neither are labeled "Not recorded (legacy run)", not
+retroactively Normal. Frontier summaries use a separate comment marker, so
+Normal and Frontier jobs for the same workflow can coexist in a matrix.
+
+```yaml
+- uses: Certora/autoprover-guardian-ci@v2
+  with:
+    api-key: ${{ secrets.CERTORA_API_KEY }}
+    workflow: ai-auditor-diff
+    context: "contracts/**/*.sol"
+    model-mode: frontier
+    max-iterations: "6"
+```
+
 ### Full AI Auditor run
 
 ```yaml
@@ -198,6 +229,7 @@ errors, so correcting the repository access or path and rerunning is safe.
 | ------------------- | ------------------ | ------------------------- | ------------------------------------------------------ |
 | `api-key`           | Yes                | —                         | Certora organization API key                           |
 | `workflow`          | No                 | `ai-auditor-diff`         | One of the five workflows listed above                 |
+| `model-mode`        | No                 | Empty (Normal)           | AI Auditor model set: `normal` or `frontier`             |
 | `context`           | AI Auditor         | —                         | Explicit repository globs; automatic selection is off  |
 | `finding`           | Finding validation | —                         | Finding description to validate, up to 8000 characters |
 | `scope`             | No                 | —                         | Full-run focus paths, within `context`                 |
@@ -225,6 +257,7 @@ errors, so correcting the repository access or path and rerunning is safe.
 | ---------------------- | -------------------------------------------------- |
 | `run-id`               | Certora run ID                                     |
 | `workflow`             | Selected workflow                                  |
+| `model-mode`           | AI Auditor mode; empty for other engines or unrecorded historical runs |
 | `status`               | Last canonical run status                          |
 | `highs-count`          | AI Auditor HIGH finding count                      |
 | `mediums-count`        | AI Auditor MEDIUM finding count                    |

@@ -1,6 +1,6 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
-import type { ActionConfig, Severity, Workflow } from "./types";
+import type { ActionConfig, ModelMode, Severity, Workflow } from "./types";
 import {
   CONTRACT_NAME_MAX,
   DEFAULT_MAX_ITERATIONS,
@@ -137,6 +137,15 @@ function parseWorkflow(input: string): Workflow {
   return workflow as Workflow;
 }
 
+function parseModelMode(input: string): ModelMode | undefined {
+  const mode = input.trim();
+  if (!mode) return undefined;
+  if (mode !== "normal" && mode !== "frontier") {
+    throw new Error('model-mode must be "normal" or "frontier".');
+  }
+  return mode;
+}
+
 function validateRepositoryPath(
   input: string,
   name: string,
@@ -232,7 +241,11 @@ export function getConfig(): ActionConfig {
   }
   const repositoryPrivate = repositoryPrivateValue;
   const workflow = parseWorkflow(core.getInput("workflow"));
+  const modelModeInput = core.getInput("model-mode");
   if (workflow === "auto-prover" || workflow === "auto-fuzzer") {
+    if (modelModeInput.trim()) {
+      throw new Error("model-mode is only supported by AI Auditor workflows.");
+    }
     const baseRepository = pr.base?.repo?.full_name;
     const headRepository = pr.head?.repo?.full_name;
     if (
@@ -330,6 +343,7 @@ export function getConfig(): ActionConfig {
   if (context.length === 0) {
     throw new Error("At least one context pattern is required.");
   }
+  const modelMode = parseModelMode(modelModeInput);
 
   if (workflow === "ai-auditor-finding-validation") {
     const finding = core.getInput("finding").trim();
@@ -346,6 +360,7 @@ export function getConfig(): ActionConfig {
       ...common,
       workflow,
       context,
+      modelMode,
       finding,
       skipSubmodules: parseBoolean(
         core.getInput("skip-submodules"),
@@ -373,6 +388,7 @@ export function getConfig(): ActionConfig {
     ...common,
     workflow,
     context,
+    modelMode,
     scope: scope.length > 0 ? scope : undefined,
     instructions: parseOptionalApiText(
       core.getInput("instructions"),

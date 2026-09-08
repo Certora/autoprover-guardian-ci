@@ -19,6 +19,7 @@ import type {
   FindingValidationActionConfig,
   FindingValidationModelVerdict,
   FindingValidationReport,
+  ModelMode,
   PublicReport,
   Run,
   RunRequest,
@@ -30,6 +31,7 @@ import { workflowEngine, workflowRunType } from "./types";
 import {
   CANCELLATION_REQUEST_TIMEOUT_MS,
   MAX_CONSECUTIVE_POLL_FAILURES,
+  modelModeLabel,
   prCommentMarker,
   SHUTDOWN_CANCEL_TIMEOUT_MS,
 } from "./constants";
@@ -67,6 +69,7 @@ function parseUsd(value: string | null | undefined): number | null {
 function initializeOutputs(): void {
   core.setOutput("run-id", "");
   core.setOutput("workflow", "");
+  core.setOutput("model-mode", "");
   core.setOutput("status", "");
   core.setOutput("run-outcome", "");
   core.setOutput("validation-verdict", "");
@@ -125,6 +128,9 @@ export function buildRunRequest(config: ActionConfig): RunRequest {
         authentication,
       },
       context: config.context,
+      ...(config.modelMode !== undefined
+        ? { model_mode: config.modelMode }
+        : {}),
       instructions: config.instructions,
       skip_submodules: config.skipSubmodules,
       max_iterations: config.maxIterations,
@@ -140,6 +146,9 @@ export function buildRunRequest(config: ActionConfig): RunRequest {
         authentication,
       },
       context: config.context,
+      ...(config.modelMode !== undefined
+        ? { model_mode: config.modelMode }
+        : {}),
       scope: config.scope,
       instructions: config.instructions,
       use_memory: config.useMemory,
@@ -157,6 +166,9 @@ export function buildRunRequest(config: ActionConfig): RunRequest {
         authentication,
       },
       context: config.context,
+      ...(config.modelMode !== undefined
+        ? { model_mode: config.modelMode }
+        : {}),
       finding: config.finding,
       skip_submodules: config.skipSubmodules,
       client_reference: reference,
@@ -454,6 +466,14 @@ function validateRunIdentity(
     run.client_reference !== clientReference(config, expectedSourceCommitSha)
   ) {
     throw new Error("Certora returned a run for a different source.");
+  }
+  if (
+    !isStandaloneConfig(config) &&
+    config.modelMode !== undefined &&
+    run.model_mode != null &&
+    run.model_mode !== config.modelMode
+  ) {
+    throw new Error("Certora returned a run for a different model mode.");
   }
   if (
     isStandaloneConfig(config) &&
@@ -763,6 +783,7 @@ async function publishFindingValidationResult(
     throw new Error("AI Auditor returned a result for a different workflow.");
   }
   const report = response.result.data.report;
+  const modelMode = reportedModelMode(config, run);
   const parsed = readFindingValidationReport(report);
   if (parsed) {
     core.setOutput("validation-verdict", parsed.final_verdict);
@@ -781,8 +802,9 @@ async function publishFindingValidationResult(
         cost: parseUsd(run.billing.charged_usd),
         report,
         parsed,
+        modelMode,
       }),
-      prCommentMarker(config.workflow),
+      prCommentMarker(config.workflow, modelMode),
     );
   }
 }
@@ -802,6 +824,7 @@ async function publishAiAuditorResult(
     throw new Error("AI Auditor returned a standalone workflow result.");
   }
   const report = response.result.data.report;
+  const modelMode = reportedModelMode(config, run);
   if (report.format === "markdown") {
     core.setOutput("highs-count", "");
     core.setOutput("mediums-count", "");
@@ -820,8 +843,9 @@ async function publishAiAuditorResult(
           runId,
           cost: parseUsd(run.billing.charged_usd),
           content: report.content,
+          modelMode,
         }),
-        prCommentMarker(config.workflow),
+        prCommentMarker(config.workflow, modelMode),
       );
     }
     if (config.failOn.length > 0) {
@@ -870,8 +894,9 @@ async function publishAiAuditorResult(
         issueLinks,
         config.prNumber,
         config.workflow,
+        modelMode,
       ),
-      prCommentMarker(config.workflow),
+      prCommentMarker(config.workflow, modelMode),
     );
   }
 
@@ -881,6 +906,13 @@ async function publishAiAuditorResult(
       `AI Auditor found ${failing.length} finding${failing.length === 1 ? "" : "s"} matching fail-on (${config.failOn.join(", ")}).`,
     );
   }
+}
+
+function reportedModelMode(
+  config: AiAuditorActionConfig | FindingValidationActionConfig,
+  run: Run,
+): ModelMode | null {
+  return run.model_mode ?? config.modelMode ?? null;
 }
 
 export async function run(): Promise<void> {
@@ -893,6 +925,11 @@ export async function run(): Promise<void> {
   core.setOutput("workflow", config.workflow);
   core.info(`Repository: ${config.repositoryUrl}`);
   core.info(`Workflow: ${config.workflow}`);
+  if (!isStandaloneConfig(config)) {
+    core.info(
+      `Model mode: ${modelModeLabel(config.modelMode)}${config.modelMode === undefined ? " (server default)" : ""}`,
+    );
+  }
   core.info(`Base commit: ${config.baseCommitSha}`);
   core.info(`Head commit: ${config.headCommitSha}`);
 
@@ -938,6 +975,9 @@ export async function run(): Promise<void> {
     activeRun = { api, runId: currentRunId, config };
     core.setOutput("run-id", currentRunId);
     core.setOutput("status", currentRun.status);
+    if (!isStandaloneConfig(config)) {
+      core.setOutput("model-mode", reportedModelMode(config, currentRun) ?? "");
+    }
     core.info(`Run created or recovered: ${currentRunId}`);
 
     core.info("Phase 4: Polling run...");
@@ -954,6 +994,9 @@ export async function run(): Promise<void> {
     currentRun = terminal;
     validateRunIdentity(currentRun, config, currentRunId);
     core.setOutput("status", currentRun.status);
+    if (!isStandaloneConfig(config)) {
+      core.setOutput("model-mode", reportedModelMode(config, currentRun) ?? "");
+    }
 
     if (
       config.githubRunAttempt > 1 &&

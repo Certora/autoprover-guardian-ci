@@ -30147,6 +30147,9 @@ function decodeRun(value) {
         !UUID_REGEX.test(run.id) ||
         typeof run.run_type !== "string" ||
         !RUN_TYPES.has(run.run_type) ||
+        (run.model_mode != null &&
+            run.model_mode !== "normal" &&
+            run.model_mode !== "frontier") ||
         typeof run.status !== "string" ||
         !RUN_STATUSES.has(run.status) ||
         !isRecord(run.source) ||
@@ -30565,6 +30568,15 @@ function parseWorkflow(input) {
     }
     return workflow;
 }
+function parseModelMode(input) {
+    const mode = input.trim();
+    if (!mode)
+        return undefined;
+    if (mode !== "normal" && mode !== "frontier") {
+        throw new Error('model-mode must be "normal" or "frontier".');
+    }
+    return mode;
+}
 function validateRepositoryPath(input, name, required) {
     const path = input.trim();
     if (!path) {
@@ -30631,7 +30643,11 @@ function getConfig() {
     }
     const repositoryPrivate = repositoryPrivateValue;
     const workflow = parseWorkflow(core.getInput("workflow"));
+    const modelModeInput = core.getInput("model-mode");
     if (workflow === "auto-prover" || workflow === "auto-fuzzer") {
+        if (modelModeInput.trim()) {
+            throw new Error("model-mode is only supported by AI Auditor workflows.");
+        }
         const baseRepository = pr.base?.repo?.full_name;
         const headRepository = pr.head?.repo?.full_name;
         if (!baseRepository ||
@@ -30694,6 +30710,7 @@ function getConfig() {
     if (context.length === 0) {
         throw new Error("At least one context pattern is required.");
     }
+    const modelMode = parseModelMode(modelModeInput);
     if (workflow === "ai-auditor-finding-validation") {
         const finding = core.getInput("finding").trim();
         if (!finding) {
@@ -30709,6 +30726,7 @@ function getConfig() {
             ...common,
             workflow,
             context,
+            modelMode,
             finding,
             skipSubmodules: parseBoolean(core.getInput("skip-submodules"), "skip-submodules", false),
         };
@@ -30725,6 +30743,7 @@ function getConfig() {
         ...common,
         workflow,
         context,
+        modelMode,
         scope: scope.length > 0 ? scope : undefined,
         instructions: parseOptionalApiText(core.getInput("instructions"), "instructions", constants_1.INSTRUCTIONS_MAX),
         useMemory: parseBoolean(core.getInput("use-memory"), "use-memory", true),
@@ -30751,6 +30770,7 @@ function getConfig() {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.FINDING_MAX = exports.INSTRUCTIONS_MAX = exports.PATTERN_ARRAY_MAX = exports.PATTERN_MAX = exports.CONTRACT_NAME_MAX = exports.REPOSITORY_PATH_MAX = exports.SHUTDOWN_CANCEL_TIMEOUT_MS = exports.CANCELLATION_REQUEST_TIMEOUT_MS = exports.API_REQUEST_TIMEOUT_MS = exports.MAX_CONSECUTIVE_POLL_FAILURES = exports.MAX_RETRY_ATTEMPTS = exports.SHA_REGEX = exports.DEFAULT_MAX_ITERATIONS = exports.DEFAULT_TIMEOUT = exports.DEFAULT_POLL_INTERVAL = exports.PR_COMMENT_MARKER = exports.AUTO_PROVER_LABEL = exports.AI_AUDITOR_LABEL = exports.SEVERITY_LABEL_PREFIX = exports.SEVERITY_EMOJI = exports.SEVERITY_ORDER = void 0;
 exports.prCommentMarker = prCommentMarker;
+exports.modelModeLabel = modelModeLabel;
 exports.SEVERITY_ORDER = {
     HIGH: 0,
     MEDIUM: 1,
@@ -30767,8 +30787,14 @@ exports.SEVERITY_LABEL_PREFIX = "ai-auditor:";
 exports.AI_AUDITOR_LABEL = "ai-auditor";
 exports.AUTO_PROVER_LABEL = "auto-prover";
 exports.PR_COMMENT_MARKER = "<!-- autoprover-guardian-ci -->";
-function prCommentMarker(workflow) {
-    return `<!-- certora-guardian-ci:${workflow} -->`;
+function prCommentMarker(workflow, modelMode) {
+    const modeSuffix = modelMode === "frontier" ? ":frontier" : "";
+    return `<!-- certora-guardian-ci:${workflow}${modeSuffix} -->`;
+}
+function modelModeLabel(modelMode = "normal") {
+    if (modelMode === null)
+        return "Not recorded (legacy run)";
+    return modelMode === "frontier" ? "Frontier" : "Normal";
 }
 exports.DEFAULT_POLL_INTERVAL = 60;
 exports.DEFAULT_TIMEOUT = 120;
@@ -30840,7 +30866,7 @@ ${finding.recommendation}
 ---
 _This issue was automatically created by [AI Auditor](https://app.certora.com). To dismiss, close this issue._`, 60_000);
 }
-function formatPrComment(findings, runId, cost, issueLinks, prNumber, workflow) {
+function formatPrComment(findings, runId, cost, issueLinks, prNumber, workflow, modelMode) {
     const displayedCost = cost === null ? "unavailable" : `$${cost.toFixed(2)}`;
     const counts = {
         HIGH: findings.highs.length,
@@ -30851,16 +30877,16 @@ function formatPrComment(findings, runId, cost, issueLinks, prNumber, workflow) 
     const totalFindings = Object.values(counts).reduce((a, b) => a + b, 0);
     let body;
     if (totalFindings === 0) {
-        body = `${(0, constants_1.prCommentMarker)(workflow)}
+        body = `${(0, constants_1.prCommentMarker)(workflow, modelMode)}
 ## \u2705 AI Auditor Results — No Findings
 
 No security issues were detected in this PR.
 
-**Run:** \`${runId}\` | **Cost:** ${displayedCost}
+**Run:** \`${runId}\` | **Cost:** ${displayedCost} | **Model mode:** ${(0, constants_1.modelModeLabel)(modelMode)}
 `;
     }
     else {
-        body = `${(0, constants_1.prCommentMarker)(workflow)}
+        body = `${(0, constants_1.prCommentMarker)(workflow, modelMode)}
 ## ${constants_1.SEVERITY_EMOJI.HIGH} AI Auditor Results
 
 | Severity | Count |
@@ -30871,7 +30897,7 @@ No security issues were detected in this PR.
 | ${constants_1.SEVERITY_EMOJI.INFO} INFO | ${counts.INFO} |
 | **Total** | **${totalFindings}** |
 
-**Run:** \`${runId}\` | **Cost:** ${displayedCost}
+**Run:** \`${runId}\` | **Cost:** ${displayedCost} | **Model mode:** ${(0, constants_1.modelModeLabel)(modelMode)}
 `;
     }
     if (issueLinks.length > 0) {
@@ -30918,12 +30944,12 @@ function truncateReport(value, limit = 45_000) {
 function formatAiAuditorMarkdownPrComment(args) {
     const displayedCost = args.cost === null ? "unavailable" : `$${args.cost.toFixed(2)}`;
     const content = truncateReport(args.content, 50_000);
-    return truncateReport(`${(0, constants_1.prCommentMarker)(args.workflow)}
+    return truncateReport(`${(0, constants_1.prCommentMarker)(args.workflow, args.modelMode)}
 ## AI Auditor Results
 
 ${content}
 
-**Run:** \`${args.runId}\` | **Cost:** ${displayedCost}
+**Run:** \`${args.runId}\` | **Cost:** ${displayedCost} | **Model mode:** ${(0, constants_1.modelModeLabel)(args.modelMode)}
 
 ---
 _Powered by [AI Auditor](https://app.certora.com)_
@@ -30937,7 +30963,7 @@ function escapeHtml(value) {
 }
 function formatFindingValidationPrComment(args) {
     const displayedCost = args.cost === null ? "unavailable" : `$${args.cost.toFixed(2)}`;
-    let body = `${(0, constants_1.prCommentMarker)("ai-auditor-finding-validation")}\n## AI Auditor Finding Validation\n\n`;
+    let body = `${(0, constants_1.prCommentMarker)("ai-auditor-finding-validation", args.modelMode)}\n## AI Auditor Finding Validation\n\n`;
     if (args.parsed) {
         const verdict = args.parsed.final_verdict === "VALID"
             ? "Valid finding"
@@ -30966,7 +30992,7 @@ function formatFindingValidationPrComment(args) {
         const json = truncateReport(JSON.stringify(args.report.content, null, 2) ?? "null");
         body += `<details>\n<summary>Unrecognized validation result</summary>\n\n<pre>${escapeHtml(json)}</pre>\n</details>\n`;
     }
-    body += `\n**Run:** \`${args.runId}\` | **Cost:** ${displayedCost}\n`;
+    body += `\n**Run:** \`${args.runId}\` | **Cost:** ${displayedCost} | **Model mode:** ${(0, constants_1.modelModeLabel)(args.modelMode)}\n`;
     body += `\n---\n_Powered by [AI Auditor](https://app.certora.com)_\n`;
     return truncateReport(body, 60_000);
 }
@@ -31477,6 +31503,7 @@ function parseUsd(value) {
 function initializeOutputs() {
     core.setOutput("run-id", "");
     core.setOutput("workflow", "");
+    core.setOutput("model-mode", "");
     core.setOutput("status", "");
     core.setOutput("run-outcome", "");
     core.setOutput("validation-verdict", "");
@@ -31520,6 +31547,9 @@ function buildRunRequest(config) {
                 authentication,
             },
             context: config.context,
+            ...(config.modelMode !== undefined
+                ? { model_mode: config.modelMode }
+                : {}),
             instructions: config.instructions,
             skip_submodules: config.skipSubmodules,
             max_iterations: config.maxIterations,
@@ -31534,6 +31564,9 @@ function buildRunRequest(config) {
                 authentication,
             },
             context: config.context,
+            ...(config.modelMode !== undefined
+                ? { model_mode: config.modelMode }
+                : {}),
             scope: config.scope,
             instructions: config.instructions,
             use_memory: config.useMemory,
@@ -31550,6 +31583,9 @@ function buildRunRequest(config) {
                 authentication,
             },
             context: config.context,
+            ...(config.modelMode !== undefined
+                ? { model_mode: config.modelMode }
+                : {}),
             finding: config.finding,
             skip_submodules: config.skipSubmodules,
             client_reference: reference,
@@ -31784,6 +31820,12 @@ function validateRunIdentity(run, config, expectedRunId, expectedSourceCommitSha
         run.client_reference !== clientReference(config, expectedSourceCommitSha)) {
         throw new Error("Certora returned a run for a different source.");
     }
+    if (!isStandaloneConfig(config) &&
+        config.modelMode !== undefined &&
+        run.model_mode != null &&
+        run.model_mode !== config.modelMode) {
+        throw new Error("Certora returned a run for a different model mode.");
+    }
     if (isStandaloneConfig(config) &&
         (run.delivery?.type !== "github_pull_request" ||
             run.delivery.pull_request_number !== config.prNumber)) {
@@ -31973,6 +32015,7 @@ async function publishFindingValidationResult(api, config, run, runId) {
         throw new Error("AI Auditor returned a result for a different workflow.");
     }
     const report = response.result.data.report;
+    const modelMode = reportedModelMode(config, run);
     const parsed = readFindingValidationReport(report);
     if (parsed) {
         core.setOutput("validation-verdict", parsed.final_verdict);
@@ -31987,7 +32030,8 @@ async function publishFindingValidationResult(api, config, run, runId) {
             cost: parseUsd(run.billing.charged_usd),
             report,
             parsed,
-        }), (0, constants_1.prCommentMarker)(config.workflow));
+            modelMode,
+        }), (0, constants_1.prCommentMarker)(config.workflow, modelMode));
     }
 }
 async function publishAiAuditorResult(api, config, run, runId) {
@@ -31998,6 +32042,7 @@ async function publishAiAuditorResult(api, config, run, runId) {
         throw new Error("AI Auditor returned a standalone workflow result.");
     }
     const report = response.result.data.report;
+    const modelMode = reportedModelMode(config, run);
     if (report.format === "markdown") {
         core.setOutput("highs-count", "");
         core.setOutput("mediums-count", "");
@@ -32012,7 +32057,8 @@ async function publishAiAuditorResult(api, config, run, runId) {
                 runId,
                 cost: parseUsd(run.billing.charged_usd),
                 content: report.content,
-            }), (0, constants_1.prCommentMarker)(config.workflow));
+                modelMode,
+            }), (0, constants_1.prCommentMarker)(config.workflow, modelMode));
         }
         if (config.failOn.length > 0) {
             core.setFailed(`AI Auditor returned only a Markdown report, so the fail-on policy (${config.failOn.join(", ")}) could not be evaluated.`);
@@ -32039,12 +32085,15 @@ async function publishAiAuditorResult(api, config, run, runId) {
     }
     core.setOutput("issues-created", issueLinks.map((entry) => entry.url).join(","));
     if (config.commentOnPr) {
-        await ghClient.upsertPrComment(config.prNumber, (0, format_1.formatPrComment)(findings, runId, parseUsd(run.billing.charged_usd), issueLinks, config.prNumber, config.workflow), (0, constants_1.prCommentMarker)(config.workflow));
+        await ghClient.upsertPrComment(config.prNumber, (0, format_1.formatPrComment)(findings, runId, parseUsd(run.billing.charged_usd), issueLinks, config.prNumber, config.workflow, modelMode), (0, constants_1.prCommentMarker)(config.workflow, modelMode));
     }
     const failing = getFindingsBySeverities(findings, config.failOn);
     if (failing.length > 0) {
         core.setFailed(`AI Auditor found ${failing.length} finding${failing.length === 1 ? "" : "s"} matching fail-on (${config.failOn.join(", ")}).`);
     }
+}
+function reportedModelMode(config, run) {
+    return run.model_mode ?? config.modelMode ?? null;
 }
 async function run() {
     registerShutdownHandlers();
@@ -32055,6 +32104,9 @@ async function run() {
     core.setOutput("workflow", config.workflow);
     core.info(`Repository: ${config.repositoryUrl}`);
     core.info(`Workflow: ${config.workflow}`);
+    if (!isStandaloneConfig(config)) {
+        core.info(`Model mode: ${(0, constants_1.modelModeLabel)(config.modelMode)}${config.modelMode === undefined ? " (server default)" : ""}`);
+    }
     core.info(`Base commit: ${config.baseCommitSha}`);
     core.info(`Head commit: ${config.headCommitSha}`);
     const api = new api_1.AutoProverApi(config.apiBaseUrl, config.apiKey);
@@ -32081,6 +32133,9 @@ async function run() {
         activeRun = { api, runId: currentRunId, config };
         core.setOutput("run-id", currentRunId);
         core.setOutput("status", currentRun.status);
+        if (!isStandaloneConfig(config)) {
+            core.setOutput("model-mode", reportedModelMode(config, currentRun) ?? "");
+        }
         core.info(`Run created or recovered: ${currentRunId}`);
         core.info("Phase 4: Polling run...");
         const terminal = await pollRun(api, currentRun, currentRunId, config, config.pollInterval, config.timeout);
@@ -32090,6 +32145,9 @@ async function run() {
         currentRun = terminal;
         validateRunIdentity(currentRun, config, currentRunId);
         core.setOutput("status", currentRun.status);
+        if (!isStandaloneConfig(config)) {
+            core.setOutput("model-mode", reportedModelMode(config, currentRun) ?? "");
+        }
         if (config.githubRunAttempt > 1 &&
             canonicalRunWasTerminalAtRecovery &&
             !usedAttemptScopedRetry &&

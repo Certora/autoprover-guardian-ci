@@ -214,6 +214,9 @@ function decodeRun(value: unknown): RunResponse {
     !UUID_REGEX.test(run.id) ||
     typeof run.run_type !== "string" ||
     !RUN_TYPES.has(run.run_type) ||
+    (run.model_mode != null &&
+      run.model_mode !== "normal" &&
+      run.model_mode !== "frontier") ||
     typeof run.status !== "string" ||
     !RUN_STATUSES.has(run.status) ||
     !isRecord(run.source) ||

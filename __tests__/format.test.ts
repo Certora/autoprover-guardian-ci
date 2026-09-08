@@ -10,6 +10,7 @@ import {
   isFailingStandaloneOutcome,
 } from "../src/format";
 import type { AissRunReport, Finding } from "../src/types";
+import { prCommentMarker } from "../src/constants";
 
 const finding: Finding = {
   id: "H-01",
@@ -53,6 +54,53 @@ const commit = {
 };
 
 describe("AI Auditor formatting", () => {
+  it("keeps the legacy Normal marker and separates Frontier comments", () => {
+    expect(prCommentMarker("ai-auditor-diff", "normal")).toBe(
+      prCommentMarker("ai-auditor-diff"),
+    );
+    expect(prCommentMarker("ai-auditor-diff", "frontier")).toBe(
+      "<!-- certora-guardian-ci:ai-auditor-diff:frontier -->",
+    );
+    expect(prCommentMarker("ai-auditor-finding-validation", "frontier")).toBe(
+      "<!-- certora-guardian-ci:ai-auditor-finding-validation:frontier -->",
+    );
+  });
+
+  it.each(["normal", "frontier"] as const)("shows %s in all audit summary formats", (modelMode) => {
+    const modeLabel = modelMode === "frontier" ? "Frontier" : "Normal";
+    const comments = [
+      formatPrComment(
+        { highs: [finding], mediums: [], lows: [], infos: [] },
+        "run-1", 1, [], 42, "ai-auditor-diff", modelMode,
+      ),
+      formatPrComment(
+        { highs: [], mediums: [], lows: [], infos: [] },
+        "run-1", 1, [], 42, "ai-auditor-full", modelMode,
+      ),
+      formatAiAuditorMarkdownPrComment({
+        workflow: "ai-auditor-diff", runId: "run-1", cost: 1,
+        content: "# Findings", modelMode,
+      }),
+      formatFindingValidationPrComment({
+        runId: "run-1", cost: 1, report: { format: "markdown", content: "Valid finding" },
+        parsed: null, modelMode,
+      }),
+    ];
+    for (const comment of comments) {
+      expect(comment).toContain(`**Model mode:** ${modeLabel}`);
+      expect(comment.split("\n")[0]).toContain(modelMode === "frontier" ? ":frontier -->" : " -->");
+    }
+  });
+
+  it("does not relabel an unrecorded historical mode as Normal", () => {
+    const body = formatAiAuditorMarkdownPrComment({
+      workflow: "ai-auditor-diff", runId: "old-run", cost: 1,
+      content: "# Findings", modelMode: null,
+    });
+    expect(body).toContain("**Model mode:** Not recorded (legacy run)");
+    expect(body).not.toContain("**Model mode:** Normal");
+  });
+
   it("uses run terminology for issues and pull-request summaries", () => {
     expect(formatIssueTitle(finding)).toContain("[AI Auditor] HIGH");
     expect(formatIssueBody(finding, "run-1", 42)).toContain(
