@@ -17,7 +17,7 @@ inputs:
     default: "ai-auditor-diff"
 
   context:
-    description: "AI Auditor only: comma-separated glob patterns for files to analyze (maximum 500 characters each)"
+    description: "Required for every AI Auditor workflow: explicit comma-separated glob patterns for files to analyze (maximum 500 characters each)"
     required: false
 
   finding:

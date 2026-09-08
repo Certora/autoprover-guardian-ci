@@ -22,6 +22,18 @@ dashboard, then save it as a repository secret named `CERTORA_API_KEY`.
 Guardian needs `runs:create` and `runs:read`; grant `runs:cancel` for timeout
 cancellation and `generated_files:write` for AutoProver or AutoFuzzer delivery.
 
+Guardian CI intentionally requires an explicit `context` input for every AI
+Auditor workflow, matching the public REST API. Select globs that include the
+audited code and relevant dependencies; automatic preview preparation is
+dashboard-only. AutoProver and AutoFuzzer do not
+use this input. GitHub action metadata cannot make an input conditionally
+required, so `action.yml` marks it optional and Guardian enforces the AI Auditor
+requirement at runtime.
+
+AI Auditor loads direct submodules only, never nested submodules. Set
+`skip-submodules: true` to skip all submodules. Include required libraries in
+the repository or a direct submodule when they would otherwise be nested.
+
 ```yaml
 name: Certora security
 
@@ -61,6 +73,11 @@ empty-body `/v2/runs/{run_id}/generated-files/commit` endpoint only after the
 run succeeds. Fork pull requests are rejected for these two workflows.
 
 ## Workflow examples
+
+AI Auditor supports any programming language for full, diff, and finding-validation
+runs. Context may mix source languages, shared libraries, resources, and relevant
+build manifests (for example `src/**/*.py,web/**/*.ts,lib/**,pyproject.toml`).
+Only AutoProver and AutoFuzzer require Solidity contracts.
 
 ### Full AI Auditor run
 
@@ -181,7 +198,7 @@ errors, so correcting the repository access or path and rerunning is safe.
 | ------------------- | ------------------ | ------------------------- | ------------------------------------------------------ |
 | `api-key`           | Yes                | —                         | Certora organization API key                           |
 | `workflow`          | No                 | `ai-auditor-diff`         | One of the five workflows listed above                 |
-| `context`           | AI Auditor         | —                         | Comma-separated repository globs, 500 chars each       |
+| `context`           | AI Auditor         | —                         | Explicit repository globs; automatic selection is off  |
 | `finding`           | Finding validation | —                         | Finding description to validate, up to 8000 characters |
 | `scope`             | No                 | —                         | Full-run focus paths, within `context`                 |
 | `instructions`      | No                 | —                         | Custom AI Auditor instructions, up to 10,000 chars     |

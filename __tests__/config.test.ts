@@ -74,6 +74,18 @@ describe("getConfig v2", () => {
     expect(setSecretMock).toHaveBeenCalledWith("ghs_test");
   });
 
+  it.each(["ai-auditor-full", "ai-auditor-diff", "ai-auditor-finding-validation"])(
+    "preserves mixed-language context for %s without requiring Solidity",
+    (workflow) => {
+      const context = ["src/**/*.py", "web/**/*.ts", "lib/**/*.rs", "server/**/*.go", "bin/worker", "Cargo.toml"];
+      inputs.set("workflow", workflow);
+      inputs.set("context", context.join(","));
+      inputs.set("scope", "src/api.py");
+      inputs.set("finding", "The Python route bypasses tenant authorization.");
+      expect(getConfig()).toMatchObject({ workflow, context });
+    },
+  );
+
   it("keeps the idempotency seed stable across GitHub rerun attempts", () => {
     const firstAttemptSeed = getConfig().idempotencySeed;
     githubContextMock.runAttempt = 3;
@@ -102,11 +114,26 @@ describe("getConfig v2", () => {
     expect(getConfig()).toMatchObject({ repositoryPrivate: true });
   });
 
-  it.each(["ai-auditor-full", "ai-auditor-diff"])(
+  it.each([
+    "ai-auditor-full",
+    "ai-auditor-diff",
+    "ai-auditor-finding-validation",
+  ])(
     "requires context for %s",
     (workflow) => {
       inputs.set("workflow", workflow);
       inputs.delete("context");
+      expect(() => getConfig()).toThrow(
+        "At least one context pattern is required.",
+      );
+    },
+  );
+
+  it.each(["", "   ", ", ,,"])(
+    "rejects blank context input %j",
+    (contextInput) => {
+      inputs.set("workflow", "ai-auditor-diff");
+      inputs.set("context", contextInput);
       expect(() => getConfig()).toThrow(
         "At least one context pattern is required.",
       );

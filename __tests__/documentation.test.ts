@@ -5,6 +5,12 @@ const readme = readFileSync("README.md", "utf8");
 const action = readFileSync("action.yml", "utf8");
 
 describe("published v2 documentation", () => {
+  it("distinguishes language-independent AI Auditor from Solidity-only engines", () => {
+    const normalizedReadme = readme.replace(/\s+/g, " ");
+    expect(normalizedReadme).toContain("AI Auditor supports any programming language");
+    expect(normalizedReadme).toContain("Only AutoProver and AutoFuzzer require Solidity contracts");
+  });
+
   it("documents the five supported workflows and v2 release", () => {
     for (const workflow of [
       "ai-auditor-full",
@@ -37,6 +43,28 @@ describe("published v2 documentation", () => {
     expect(readme).toContain("https://app.certora.com");
     expect(action).toContain('default: "https://app.certora.com"');
     expect(action).toContain('using: "node24"');
+  });
+
+  it("documents Guardian's explicit AI Auditor context policy", () => {
+    const normalizedReadme = readme.replace(/\s+/g, " ");
+    expect(normalizedReadme).toContain(
+      "Guardian CI intentionally requires an explicit `context` input for every AI Auditor workflow",
+    );
+    expect(normalizedReadme).toContain("matching the public REST API");
+    expect(normalizedReadme).toContain(
+      "loads direct submodules only, never nested submodules",
+    );
+    expect(normalizedReadme).not.toContain(
+      "public REST API supports automatic context selection",
+    );
+    expect(normalizedReadme).toContain(
+      "GitHub action metadata cannot make an input conditionally required",
+    );
+    expect(action).toContain(
+      "Required for every AI Auditor workflow: explicit comma-separated glob patterns",
+    );
+    const contextInput = action.split("  context:")[1]?.split("\n\n")[0] ?? "";
+    expect(contextInput).toContain("required: false");
   });
 
   it("states that GitHub credentials stay local", () => {
