@@ -1,4 +1,4 @@
-import type { Severity } from "./types";
+import type { ModelMode, Severity } from "./types";
 
 export const SEVERITY_ORDER: Record<Severity, number> = {
   HIGH: 0,
@@ -14,11 +14,25 @@ export const SEVERITY_EMOJI: Record<Severity, string> = {
   INFO: "\u{1F535}",
 };
 
-export const SEVERITY_LABEL_PREFIX = "auto-prover:";
+export const SEVERITY_LABEL_PREFIX = "ai-auditor:";
 
-export const ZEUS_AUDIT_LABEL = "auto-prover";
+export const AI_AUDITOR_LABEL = "ai-auditor";
+export const AUTO_PROVER_LABEL = "auto-prover";
 
-export const PR_COMMENT_MARKER = "<!-- zeus-guardian-ci -->";
+export const PR_COMMENT_MARKER = "<!-- autoprover-guardian-ci -->";
+
+export function prCommentMarker(
+  workflow: string,
+  modelMode?: ModelMode | null,
+): string {
+  const modeSuffix = modelMode === "frontier" ? ":frontier" : "";
+  return `<!-- certora-guardian-ci:${workflow}${modeSuffix} -->`;
+}
+
+export function modelModeLabel(modelMode: ModelMode | null = "normal"): string {
+  if (modelMode === null) return "Not recorded (legacy run)";
+  return modelMode === "frontier" ? "Frontier" : "Normal";
+}
 
 export const DEFAULT_POLL_INTERVAL = 60;
 export const DEFAULT_TIMEOUT = 120;
@@ -28,3 +42,12 @@ export const SHA_REGEX = /^[0-9a-f]{40}$/;
 
 export const MAX_RETRY_ATTEMPTS = 3;
 export const MAX_CONSECUTIVE_POLL_FAILURES = 5;
+export const API_REQUEST_TIMEOUT_MS = 60_000;
+export const CANCELLATION_REQUEST_TIMEOUT_MS = 15_000;
+export const SHUTDOWN_CANCEL_TIMEOUT_MS = 5_000;
+export const REPOSITORY_PATH_MAX = 500;
+export const CONTRACT_NAME_MAX = 200;
+export const PATTERN_MAX = 500;
+export const PATTERN_ARRAY_MAX = 5_000;
+export const INSTRUCTIONS_MAX = 10_000;
+export const FINDING_MAX = 8_000;
