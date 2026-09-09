@@ -66,36 +66,60 @@ describe("AI Auditor formatting", () => {
     );
   });
 
-  it.each(["normal", "frontier"] as const)("shows %s in all audit summary formats", (modelMode) => {
-    const modeLabel = modelMode === "frontier" ? "Frontier" : "Normal";
-    const comments = [
-      formatPrComment(
-        { highs: [finding], mediums: [], lows: [], infos: [] },
-        "run-1", 1, [], 42, "ai-auditor-diff", modelMode,
-      ),
-      formatPrComment(
-        { highs: [], mediums: [], lows: [], infos: [] },
-        "run-1", 1, [], 42, "ai-auditor-full", modelMode,
-      ),
-      formatAiAuditorMarkdownPrComment({
-        workflow: "ai-auditor-diff", runId: "run-1", cost: 1,
-        content: "# Findings", modelMode,
-      }),
-      formatFindingValidationPrComment({
-        runId: "run-1", cost: 1, report: { format: "markdown", content: "Valid finding" },
-        parsed: null, modelMode,
-      }),
-    ];
-    for (const comment of comments) {
-      expect(comment).toContain(`**Model mode:** ${modeLabel}`);
-      expect(comment.split("\n")[0]).toContain(modelMode === "frontier" ? ":frontier -->" : " -->");
-    }
-  });
+  it.each(["normal", "frontier"] as const)(
+    "shows %s in all audit summary formats",
+    (modelMode) => {
+      const modeLabel = modelMode === "frontier" ? "Frontier" : "Normal";
+      const comments = [
+        formatPrComment(
+          { highs: [finding], mediums: [], lows: [], infos: [] },
+          "run-1",
+          1,
+          [],
+          42,
+          "ai-auditor-diff",
+          modelMode,
+        ),
+        formatPrComment(
+          { highs: [], mediums: [], lows: [], infos: [] },
+          "run-1",
+          1,
+          [],
+          42,
+          "ai-auditor-full",
+          modelMode,
+        ),
+        formatAiAuditorMarkdownPrComment({
+          workflow: "ai-auditor-diff",
+          runId: "run-1",
+          cost: 1,
+          content: "# Findings",
+          modelMode,
+        }),
+        formatFindingValidationPrComment({
+          runId: "run-1",
+          cost: 1,
+          report: { format: "markdown", content: "Valid finding" },
+          parsed: null,
+          modelMode,
+        }),
+      ];
+      for (const comment of comments) {
+        expect(comment).toContain(`**Model mode:** ${modeLabel}`);
+        expect(comment.split("\n")[0]).toContain(
+          modelMode === "frontier" ? ":frontier -->" : " -->",
+        );
+      }
+    },
+  );
 
   it("does not relabel an unrecorded historical mode as Normal", () => {
     const body = formatAiAuditorMarkdownPrComment({
-      workflow: "ai-auditor-diff", runId: "old-run", cost: 1,
-      content: "# Findings", modelMode: null,
+      workflow: "ai-auditor-diff",
+      runId: "old-run",
+      cost: 1,
+      content: "# Findings",
+      modelMode: null,
     });
     expect(body).toContain("**Model mode:** Not recorded (legacy run)");
     expect(body).not.toContain("**Model mode:** Normal");
@@ -136,6 +160,22 @@ describe("AI Auditor formatting", () => {
     expect(body).toContain("Output truncated");
     expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(60_000);
   });
+
+  it.each([0, 1, 2, 3])(
+    "does not split Unicode code points at truncation byte alignment %i",
+    (padding) => {
+      const body = formatAiAuditorMarkdownPrComment({
+        runId: "run-1",
+        cost: 1.25,
+        workflow: "ai-auditor-diff",
+        content: `${"a".repeat(padding)}${"🔐".repeat(20_000)}`,
+      });
+
+      expect(Buffer.from(body, "utf8").toString("utf8")).toBe(body);
+      expect(body).toContain("Output truncated");
+      expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(60_000);
+    },
+  );
 
   it("renders a structured finding-validation verdict", () => {
     const body = formatFindingValidationPrComment({

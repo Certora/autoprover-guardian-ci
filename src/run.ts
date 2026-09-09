@@ -1,5 +1,9 @@
 import * as core from "@actions/core";
-import { AutoProverApi, createIdempotencyKey } from "./api";
+import {
+  AutoProverApi,
+  AutoProverApiDeadlineError,
+  createIdempotencyKey,
+} from "./api";
 import { getConfig } from "./config";
 import {
   formatAiAuditorMarkdownPrComment,
@@ -37,7 +41,15 @@ import {
 } from "./constants";
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  const until = Date.now() + ms;
+  return new Promise((resolve) => {
+    const tick = () => {
+      const remaining = until - Date.now();
+      if (remaining <= 0) resolve();
+      else setTimeout(tick, Math.min(remaining, 30_000));
+    };
+    tick();
+  });
 }
 
 function getAllFindings(findings: AuditFindings): Finding[] {
@@ -92,9 +104,7 @@ function sourceAuthentication(config: ActionConfig) {
 function isStandaloneConfig(
   config: ActionConfig,
 ): config is StandaloneActionConfig {
-  return (
-    config.workflow === "auto-prover" || config.workflow === "auto-fuzzer"
-  );
+  return config.workflow === "auto-prover" || config.workflow === "auto-fuzzer";
 }
 
 function isFindingValidationConfig(
@@ -486,8 +496,11 @@ function validateRunIdentity(
   }
 }
 
-let activeRun: { api: AutoProverApi; runId: string; config: ActionConfig } | null =
-  null;
+let activeRun: {
+  api: AutoProverApi;
+  runId: string;
+  config: ActionConfig;
+} | null = null;
 let shutdownHandlersRegistered = false;
 let shuttingDown = false;
 
@@ -620,6 +633,8 @@ async function publishStandaloneResult(args: {
         commit,
       }),
       prCommentMarker(config.workflow),
+      commit.delivery.commit_sha ?? config.headCommitSha,
+      runId,
     );
   }
 
@@ -636,6 +651,7 @@ async function tryGeneratedFollowup(
   config: StandaloneActionConfig,
   api: AutoProverApi,
   ghClient: GitHubClient,
+  deadlineMs: number,
 ): Promise<boolean> {
   const followup = await ghClient.getGeneratedFollowup(config.headCommitSha);
   if (!followup) return false;
@@ -659,7 +675,7 @@ async function tryGeneratedFollowup(
     );
   }
   await publishStandaloneResult({
-    api,
+    api: completionApi(config, deadlineMs),
     config,
     ghClient,
     run: response.run,
@@ -676,8 +692,8 @@ async function pollRun(
   config: ActionConfig,
   pollIntervalSeconds: number,
   timeoutMinutes: number,
+  deadlineMs: number,
 ): Promise<Run | null> {
-  const deadlineMs = Date.now() + timeoutMinutes * 60_000;
   let run = initialRun;
   let consecutiveFailures = 0;
 
@@ -734,6 +750,14 @@ async function pollRun(
           : `Status: ${run.status}`,
       );
     } catch (error) {
+      if (error instanceof AutoProverApiDeadlineError) {
+        // Expired in-flight requests use the normal bounded cancellation path.
+        if (Date.now() >= deadlineMs) continue;
+        // A quota reset beyond our budget is not permission to poll or cancel
+        // early. Keep the known run ID and explain when recovery can resume.
+        core.setFailed(error.message);
+        return null;
+      }
       consecutiveFailures += 1;
       core.warning(
         `Run poll failed (${consecutiveFailures}/${MAX_CONSECUTIVE_POLL_FAILURES}): ${error instanceof Error ? error.message : String(error)}`,
@@ -805,6 +829,8 @@ async function publishFindingValidationResult(
         modelMode,
       }),
       prCommentMarker(config.workflow, modelMode),
+      config.headCommitSha,
+      runId,
     );
   }
 }
@@ -846,6 +872,8 @@ async function publishAiAuditorResult(
           modelMode,
         }),
         prCommentMarker(config.workflow, modelMode),
+        config.headCommitSha,
+        runId,
       );
     }
     if (config.failOn.length > 0) {
@@ -897,6 +925,8 @@ async function publishAiAuditorResult(
         modelMode,
       ),
       prCommentMarker(config.workflow, modelMode),
+      config.headCommitSha,
+      runId,
     );
   }
 
@@ -915,6 +945,20 @@ function reportedModelMode(
   return run.model_mode ?? config.modelMode ?? null;
 }
 
+function completionApi(
+  config: ActionConfig,
+  deadlineMs: number,
+): AutoProverApi {
+  // A successful timeout/cancel race must still be able to read its result.
+  // This client never launches audits; result and delivery share one grace
+  // budget rather than receiving a new timeout on every request.
+  return new AutoProverApi(
+    config.apiBaseUrl,
+    config.apiKey,
+    Math.max(deadlineMs, Date.now() + CANCELLATION_REQUEST_TIMEOUT_MS),
+  );
+}
+
 export async function run(): Promise<void> {
   registerShutdownHandlers();
   activeRun = null;
@@ -922,6 +966,10 @@ export async function run(): Promise<void> {
 
   core.info("Phase 1: Validating inputs...");
   const config = getConfig();
+  const deadlineMs = Date.now() + config.timeout * 60_000;
+  if (!Number.isSafeInteger(deadlineMs)) {
+    throw new Error("The configured timeout is too large.");
+  }
   core.setOutput("workflow", config.workflow);
   core.info(`Repository: ${config.repositoryUrl}`);
   core.info(`Workflow: ${config.workflow}`);
@@ -933,31 +981,16 @@ export async function run(): Promise<void> {
   core.info(`Base commit: ${config.baseCommitSha}`);
   core.info(`Head commit: ${config.headCommitSha}`);
 
-  const api = new AutoProverApi(config.apiBaseUrl, config.apiKey);
+  const api = new AutoProverApi(config.apiBaseUrl, config.apiKey, deadlineMs);
   if (isStandaloneConfig(config)) {
     const ghClient = new GitHubClient(config.githubToken);
-    if (await tryGeneratedFollowup(config, api, ghClient)) return;
+    if (await tryGeneratedFollowup(config, api, ghClient, deadlineMs)) return;
   }
 
   const body = buildRunRequest(config);
-  let estimateQuoteId: string | undefined;
-  if (!isStandaloneConfig(config) && config.context.length === 0) {
-    core.info(
-      "Phase 2: Using server-selected context; no separate preview. The server checks balance and reserves the required amount during launch.",
-    );
-  } else {
-    core.info("Phase 2: Estimating run...");
-    const estimate = (await api.estimateRun(config.workflow, body)).estimate;
-    core.info(
-      `Estimated cost: $${estimate.estimated_cost_usd}; minimum required balance: $${estimate.minimum_balance_required_usd}; current balance: $${estimate.balance_usd}.`,
-    );
-    if (!estimate.can_launch) {
-      throw new Error(
-        `The run cannot launch: balance $${estimate.balance_usd}, minimum required $${estimate.minimum_balance_required_usd}.`,
-      );
-    }
-    estimateQuoteId = estimate.estimate_quote_id;
-  }
+  core.info(
+    "Phase 2: Launch preflight is handled by the server. Existing runs are recovered before source and balance checks; new runs are validated and reserve balance during launch.",
+  );
 
   core.info("Phase 3: Launching run...");
   const idempotencyKey = createIdempotencyKey(
@@ -965,15 +998,22 @@ export async function run(): Promise<void> {
     body,
     config.idempotencySeed,
   );
-  let currentRun = (
-    await api.createRun(
-      config.workflow,
-      body,
-      idempotencyKey,
-      estimateQuoteId,
-    )
-  ).run;
+  let currentRun = (await api.createRun(config.workflow, body, idempotencyKey))
+    .run;
   let currentRunId = currentRun.id;
+  validateRunIdentity(currentRun, config, currentRunId);
+  // Preserve the accepted run reference even if refreshing its status fails.
+  core.setOutput("run-id", currentRunId);
+  activeRun = currentRun.cancellable
+    ? { api, runId: currentRunId, config }
+    : null;
+  if (config.githubRunAttempt > 1) {
+    // A completed idempotency record replays the original launch response,
+    // usually queued. Only a fresh resource can decide whether this GitHub
+    // rerun recovered an already-terminal failure eligible for one retry.
+    currentRun = (await api.getRun(currentRunId)).run;
+    validateRunIdentity(currentRun, config, currentRunId);
+  }
   const canonicalRunWasTerminalAtRecovery =
     currentRun.status === "failed" || currentRun.status === "cancelled";
   let usedAttemptScopedRetry = false;
@@ -997,6 +1037,7 @@ export async function run(): Promise<void> {
       config,
       config.pollInterval,
       config.timeout,
+      deadlineMs,
     );
     activeRun = null;
     if (!terminal) return;
@@ -1013,6 +1054,7 @@ export async function run(): Promise<void> {
       !usedAttemptScopedRetry &&
       (currentRun.status === "failed" || currentRun.status === "cancelled")
     ) {
+      if (Date.now() >= deadlineMs) throw new AutoProverApiDeadlineError();
       usedAttemptScopedRetry = true;
       const retryIdempotencyKey = createIdempotencyKey(
         config.workflow,
@@ -1023,12 +1065,7 @@ export async function run(): Promise<void> {
         `GitHub rerun attempt ${config.githubRunAttempt} recovered terminal ${currentRun.status} run ${currentRunId}; launching one attempt-scoped retry.`,
       );
       currentRun = (
-        await api.createRun(
-          config.workflow,
-          body,
-          retryIdempotencyKey,
-          estimateQuoteId,
-        )
+        await api.createRun(config.workflow, body, retryIdempotencyKey)
       ).run;
       currentRunId = currentRun.id;
       continue;
@@ -1049,18 +1086,24 @@ export async function run(): Promise<void> {
   }
 
   core.info("Phase 5: Processing result...");
+  const resultApi = completionApi(config, deadlineMs);
   if (isStandaloneConfig(config)) {
     await publishStandaloneResult({
-      api,
+      api: resultApi,
       config,
       ghClient: new GitHubClient(config.githubToken),
       run: currentRun,
       runId: currentRunId,
     });
   } else if (isFindingValidationConfig(config)) {
-    await publishFindingValidationResult(api, config, currentRun, currentRunId);
+    await publishFindingValidationResult(
+      resultApi,
+      config,
+      currentRun,
+      currentRunId,
+    );
   } else {
-    await publishAiAuditorResult(api, config, currentRun, currentRunId);
+    await publishAiAuditorResult(resultApi, config, currentRun, currentRunId);
   }
 
   core.info(

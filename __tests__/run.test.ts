@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   apiMethods,
@@ -36,6 +36,12 @@ vi.mock("@actions/core", () => ({
 vi.mock("../src/config", () => ({ getConfig: getConfigMock }));
 vi.mock("../src/api", () => ({
   createIdempotencyKey: createIdempotencyKeyMock,
+  AutoProverApiDeadlineError: class extends Error {
+    constructor() {
+      super("The configured run timeout expired during a Certora API request.");
+      this.name = "AutoProverApiDeadlineError";
+    }
+  },
   AutoProverApi: vi.fn(function AutoProverApi() {
     return apiMethods;
   }),
@@ -52,6 +58,7 @@ vi.mock("../src/github", () => ({
 }));
 
 import { buildRunRequest, run } from "../src/run";
+import { AutoProverApi } from "../src/api";
 import type {
   AiAuditorActionConfig,
   FindingValidationActionConfig,
@@ -64,7 +71,6 @@ import { workflowRunType } from "../src/types";
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 const RETRY_RUN_ID = "22222222-2222-4222-8222-222222222222";
-const ESTIMATE_QUOTE_ID = "33333333-3333-4333-8333-333333333333";
 const HEAD_SHA = "b".repeat(40);
 
 function aiConfig(
@@ -345,6 +351,7 @@ const commit = {
 describe("run v2 orchestration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    for (const method of Object.values(apiMethods)) method.mockReset();
     createIdempotencyKeyMock.mockReturnValue("certora-guardian-stable");
     getGeneratedFollowupMock.mockResolvedValue(null);
     apiMethods.estimateRun.mockResolvedValue(estimate());
@@ -355,51 +362,87 @@ describe("run v2 orchestration", () => {
     apiMethods.commitGeneratedFiles.mockResolvedValue(commit);
   });
 
-  describe.each(["normal", "frontier"] as const)("automatic context in %s mode", (modelMode) => {
-    it.each(["ai-auditor-full", "ai-auditor-diff", "ai-auditor-finding-validation"] as const)(
-      "launches %s directly without locally selecting files or requiring a preview",
-      async (workflow) => {
-        const base = workflow === "ai-auditor-finding-validation"
-          ? findingValidationConfig()
-          : aiConfig(workflow);
-        const config = { ...base, context: [], modelMode, repositoryPrivate: true, skipSubmodules: true };
-        getConfigMock.mockReturnValue(config);
-        apiMethods.createRun.mockResolvedValue({
-          request_id: "req-auto", run: { ...runResource(workflow), model_mode: modelMode },
-        });
-        apiMethods.getResult.mockResolvedValue(workflow === "ai-auditor-finding-validation"
-          ? findingValidationResult() : aiResult(workflow));
+  describe.each(["normal", "frontier"] as const)(
+    "automatic context in %s mode",
+    (modelMode) => {
+      it.each([
+        "ai-auditor-full",
+        "ai-auditor-diff",
+        "ai-auditor-finding-validation",
+      ] as const)(
+        "launches %s directly without locally selecting files or requiring a preview",
+        async (workflow) => {
+          const base =
+            workflow === "ai-auditor-finding-validation"
+              ? findingValidationConfig()
+              : aiConfig(workflow);
+          const config = {
+            ...base,
+            context: [],
+            modelMode,
+            repositoryPrivate: true,
+            skipSubmodules: true,
+          };
+          getConfigMock.mockReturnValue(config);
+          apiMethods.createRun.mockResolvedValue({
+            request_id: "req-auto",
+            run: { ...runResource(workflow), model_mode: modelMode },
+          });
+          apiMethods.getResult.mockResolvedValue(
+            workflow === "ai-auditor-finding-validation"
+              ? findingValidationResult()
+              : aiResult(workflow),
+          );
 
-        await run();
+          await run();
 
-        const body = buildRunRequest(config);
-        expect(body).toMatchObject({
-          context: [], model_mode: modelMode, skip_submodules: true,
-          source: { authentication: { type: "organization_github_app" } },
-        });
-        expect(JSON.stringify(body)).not.toContain(config.githubToken);
-        expect(apiMethods.estimateRun).not.toHaveBeenCalled();
-        expect(apiMethods.createRun).toHaveBeenCalledExactlyOnceWith(
-          workflow, body, "certora-guardian-stable", undefined,
-        );
-        expect(createIdempotencyKeyMock).toHaveBeenCalledWith(workflow, body, config.idempotencySeed);
-        expect(infoMock).toHaveBeenCalledWith("Reserved balance: $10.0000.");
-        if (workflow === "ai-auditor-full") {
-          expect(body).toHaveProperty("scope", ["contracts/src/**"]);
-        } else if (workflow === "ai-auditor-diff") {
-          expect(body).not.toHaveProperty("scope");
-          expect(body).toMatchObject({ source: { base_commit_sha: "a".repeat(40), head_commit_sha: HEAD_SHA } });
-        } else {
-          expect(body).toHaveProperty("finding", "Vault.withdraw() may be reentrant.");
-          expect(body).not.toHaveProperty("max_iterations");
-        }
-      },
-    );
-  });
+          const body = buildRunRequest(config);
+          expect(body).toMatchObject({
+            context: [],
+            model_mode: modelMode,
+            skip_submodules: true,
+            source: { authentication: { type: "organization_github_app" } },
+          });
+          expect(JSON.stringify(body)).not.toContain(config.githubToken);
+          expect(apiMethods.estimateRun).not.toHaveBeenCalled();
+          expect(apiMethods.createRun).toHaveBeenCalledExactlyOnceWith(
+            workflow,
+            body,
+            "certora-guardian-stable",
+          );
+          expect(createIdempotencyKeyMock).toHaveBeenCalledWith(
+            workflow,
+            body,
+            config.idempotencySeed,
+          );
+          expect(infoMock).toHaveBeenCalledWith("Reserved balance: $10.0000.");
+          if (workflow === "ai-auditor-full") {
+            expect(body).toHaveProperty("scope", ["contracts/src/**"]);
+          } else if (workflow === "ai-auditor-diff") {
+            expect(body).not.toHaveProperty("scope");
+            expect(body).toMatchObject({
+              source: {
+                base_commit_sha: "a".repeat(40),
+                head_commit_sha: HEAD_SHA,
+              },
+            });
+          } else {
+            expect(body).toHaveProperty(
+              "finding",
+              "Vault.withdraw() may be reentrant.",
+            );
+            expect(body).not.toHaveProperty("max_iterations");
+          }
+        },
+      );
+    },
+  );
 
   it("preserves the server's insufficient-balance failure for automatic context", async () => {
     getConfigMock.mockReturnValue({ ...aiConfig(), context: [] });
-    apiMethods.createRun.mockRejectedValueOnce(new Error("insufficient_balance"));
+    apiMethods.createRun.mockRejectedValueOnce(
+      new Error("insufficient_balance"),
+    );
 
     await expect(run()).rejects.toThrow("insufficient_balance");
 
@@ -416,75 +459,109 @@ describe("run v2 orchestration", () => {
       const body = buildRunRequest(config);
       expect(body).not.toHaveProperty("model_mode");
       expect(body).toHaveProperty("max_iterations", 6);
-      expect(buildRunRequest({ ...config, modelMode: undefined })).toEqual(body);
+      expect(buildRunRequest({ ...config, modelMode: undefined })).toEqual(
+        body,
+      );
     },
   );
 
-  describe.each(["normal", "frontier"] as const)("model-mode %s", (modelMode) => {
-    it.each(["ai-auditor-full", "ai-auditor-diff"] as const)(
-      "estimates and launches %s with the identical mode and explicit iterations",
-      async (workflow) => {
-        const config = { ...aiConfig(workflow), modelMode, maxIterations: 8, commentOnPr: true };
+  describe.each(["normal", "frontier"] as const)(
+    "model-mode %s",
+    (modelMode) => {
+      it.each(["ai-auditor-full", "ai-auditor-diff"] as const)(
+        "launches %s with the requested mode and explicit iterations",
+        async (workflow) => {
+          const config = {
+            ...aiConfig(workflow),
+            modelMode,
+            maxIterations: 8,
+            commentOnPr: true,
+          };
+          getConfigMock.mockReturnValue(config);
+          apiMethods.createRun.mockResolvedValue({
+            request_id: "req-mode",
+            run: { ...runResource(workflow), model_mode: modelMode },
+          });
+          apiMethods.getResult.mockResolvedValue(aiResult(workflow));
+
+          await run();
+
+          const body = buildRunRequest(config);
+          expect(body).toHaveProperty("model_mode", modelMode);
+          expect(body).toHaveProperty("max_iterations", 8);
+          expect(apiMethods.estimateRun).not.toHaveBeenCalled();
+          expect(apiMethods.createRun).toHaveBeenCalledWith(
+            workflow,
+            body,
+            "certora-guardian-stable",
+          );
+          expect(setOutputMock).toHaveBeenCalledWith("model-mode", modelMode);
+          const label = modelMode === "frontier" ? "Frontier" : "Normal";
+          expect(infoMock).toHaveBeenCalledWith(`Model mode: ${label}`);
+          expect(upsertPrCommentMock).toHaveBeenCalledWith(
+            42,
+            expect.stringContaining(`**Model mode:** ${label}`),
+            `<!-- certora-guardian-ci:${workflow}${modelMode === "frontier" ? ":frontier" : ""} -->`,
+            HEAD_SHA,
+            RUN_ID,
+          );
+        },
+      );
+
+      it("forwards mode for finding validation without adding iterations", async () => {
+        const config = { ...findingValidationConfig(), modelMode };
         getConfigMock.mockReturnValue(config);
         apiMethods.createRun.mockResolvedValue({
-          request_id: "req-mode", run: { ...runResource(workflow), model_mode: modelMode },
+          request_id: "req-mode",
+          run: { ...runResource(config.workflow), model_mode: modelMode },
         });
-        apiMethods.getResult.mockResolvedValue(aiResult(workflow));
+        apiMethods.getResult.mockResolvedValue(findingValidationResult());
 
         await run();
 
         const body = buildRunRequest(config);
         expect(body).toHaveProperty("model_mode", modelMode);
-        expect(body).toHaveProperty("max_iterations", 8);
-        expect(apiMethods.estimateRun).toHaveBeenCalledWith(workflow, body);
-        expect(apiMethods.createRun).toHaveBeenCalledWith(workflow, body, "certora-guardian-stable", undefined);
-        expect(setOutputMock).toHaveBeenCalledWith("model-mode", modelMode);
-        const label = modelMode === "frontier" ? "Frontier" : "Normal";
-        expect(infoMock).toHaveBeenCalledWith(`Model mode: ${label}`);
-        expect(upsertPrCommentMock).toHaveBeenCalledWith(
-          42, expect.stringContaining(`**Model mode:** ${label}`),
-          `<!-- certora-guardian-ci:${workflow}${modelMode === "frontier" ? ":frontier" : ""} -->`,
+        expect(body).not.toHaveProperty("max_iterations");
+        expect(apiMethods.estimateRun).not.toHaveBeenCalled();
+        expect(apiMethods.createRun).toHaveBeenCalledWith(
+          config.workflow,
+          body,
+          "certora-guardian-stable",
         );
-      },
-    );
-
-    it("forwards mode for finding validation without adding iterations", async () => {
-      const config = { ...findingValidationConfig(), modelMode };
-      getConfigMock.mockReturnValue(config);
-      apiMethods.createRun.mockResolvedValue({
-        request_id: "req-mode", run: { ...runResource(config.workflow), model_mode: modelMode },
+        expect(upsertPrCommentMock).toHaveBeenCalledWith(
+          42,
+          expect.stringContaining(
+            `**Model mode:** ${modelMode === "frontier" ? "Frontier" : "Normal"}`,
+          ),
+          `<!-- certora-guardian-ci:ai-auditor-finding-validation${modelMode === "frontier" ? ":frontier" : ""} -->`,
+          HEAD_SHA,
+          RUN_ID,
+        );
       });
-      apiMethods.getResult.mockResolvedValue(findingValidationResult());
-
-      await run();
-
-      const body = buildRunRequest(config);
-      expect(body).toHaveProperty("model_mode", modelMode);
-      expect(body).not.toHaveProperty("max_iterations");
-      expect(apiMethods.estimateRun).toHaveBeenCalledWith(config.workflow, body);
-      expect(apiMethods.createRun).toHaveBeenCalledWith(config.workflow, body, "certora-guardian-stable", undefined);
-      expect(upsertPrCommentMock).toHaveBeenCalledWith(
-        42, expect.stringContaining(`**Model mode:** ${modelMode === "frontier" ? "Frontier" : "Normal"}`),
-        `<!-- certora-guardian-ci:ai-auditor-finding-validation${modelMode === "frontier" ? ":frontier" : ""} -->`,
-      );
-    });
-  });
+    },
+  );
 
   it("does not relabel an unrecorded historical run as Normal", async () => {
     const config = { ...aiConfig(), commentOnPr: true };
     getConfigMock.mockReturnValue(config);
     apiMethods.createRun.mockResolvedValue({
-      request_id: "req-legacy", run: { ...runResource(config.workflow), model_mode: null },
+      request_id: "req-legacy",
+      run: { ...runResource(config.workflow), model_mode: null },
     });
     apiMethods.getResult.mockResolvedValue(aiResult(config.workflow));
 
     await run();
 
-    expect(infoMock).toHaveBeenCalledWith("Model mode: Normal (server default)");
+    expect(infoMock).toHaveBeenCalledWith(
+      "Model mode: Normal (server default)",
+    );
     expect(setOutputMock).not.toHaveBeenCalledWith("model-mode", "normal");
     expect(upsertPrCommentMock).toHaveBeenCalledWith(
-      42, expect.stringContaining("**Model mode:** Not recorded (legacy run)"),
+      42,
+      expect.stringContaining("**Model mode:** Not recorded (legacy run)"),
       "<!-- certora-guardian-ci:ai-auditor-diff -->",
+      HEAD_SHA,
+      RUN_ID,
     );
   });
 
@@ -492,7 +569,8 @@ describe("run v2 orchestration", () => {
     const config = { ...aiConfig(), modelMode: "frontier" as ModelMode };
     getConfigMock.mockReturnValue(config);
     apiMethods.createRun.mockResolvedValue({
-      request_id: "req-conflict", run: { ...runResource(config.workflow), model_mode: "normal" },
+      request_id: "req-conflict",
+      run: { ...runResource(config.workflow), model_mode: "normal" },
     });
 
     await expect(run()).rejects.toThrow("different model mode");
@@ -500,22 +578,32 @@ describe("run v2 orchestration", () => {
     expect(apiMethods.getResult).not.toHaveBeenCalled();
   });
 
-  it("never retries a rejected Frontier estimate without its mode", async () => {
+  it("never retries a rejected Frontier launch without its mode", async () => {
     const config = { ...aiConfig(), modelMode: "frontier" as ModelMode };
     getConfigMock.mockReturnValue(config);
-    apiMethods.estimateRun.mockRejectedValue(new Error("model_mode is not supported"));
+    apiMethods.createRun.mockRejectedValue(
+      new Error("model_mode is not supported"),
+    );
 
     await expect(run()).rejects.toThrow("model_mode is not supported");
-    expect(apiMethods.estimateRun).toHaveBeenCalledTimes(1);
-    expect(apiMethods.estimateRun).toHaveBeenCalledWith(config.workflow, expect.objectContaining({ model_mode: "frontier" }));
-    expect(apiMethods.createRun).not.toHaveBeenCalled();
+    expect(apiMethods.estimateRun).not.toHaveBeenCalled();
+    expect(apiMethods.createRun).toHaveBeenCalledExactlyOnceWith(
+      config.workflow,
+      expect.objectContaining({ model_mode: "frontier" }),
+      "certora-guardian-stable",
+    );
   });
 
-  it.each(["auto-prover", "auto-fuzzer"] as const)("does not add audit mode to %s requests", (workflow) => {
-    expect(buildRunRequest(standaloneConfig(workflow))).not.toHaveProperty("model_mode");
-  });
+  it.each(["auto-prover", "auto-fuzzer"] as const)(
+    "does not add audit mode to %s requests",
+    (workflow) => {
+      expect(buildRunRequest(standaloneConfig(workflow))).not.toHaveProperty(
+        "model_mode",
+      );
+    },
+  );
 
-  it("estimates and launches an AI diff run with the identical body", async () => {
+  it("launches an AI diff run with the exact validated body and stable key", async () => {
     const config = aiConfig("ai-auditor-diff");
     const succeeded = runResource(config.workflow);
     getConfigMock.mockReturnValue(config);
@@ -528,10 +616,7 @@ describe("run v2 orchestration", () => {
     await run();
 
     const expectedBody = buildRunRequest(config);
-    expect(apiMethods.estimateRun).toHaveBeenCalledWith(
-      config.workflow,
-      expectedBody,
-    );
+    expect(apiMethods.estimateRun).not.toHaveBeenCalled();
     expect(createIdempotencyKeyMock).toHaveBeenCalledWith(
       config.workflow,
       expectedBody,
@@ -541,7 +626,6 @@ describe("run v2 orchestration", () => {
       config.workflow,
       expectedBody,
       "certora-guardian-stable",
-      undefined,
     );
     expect(setOutputMock).toHaveBeenCalledWith("run-id", RUN_ID);
     expect(setOutputMock).toHaveBeenCalledWith("status", "succeeded");
@@ -554,6 +638,10 @@ describe("run v2 orchestration", () => {
     getConfigMock.mockReturnValue(config);
     apiMethods.createRun.mockResolvedValue({
       request_id: "req-replay",
+      run: runResource(config.workflow, "queued"),
+    });
+    apiMethods.getRun.mockResolvedValue({
+      request_id: "req-current",
       run: runResource(config.workflow),
     });
     apiMethods.getResult.mockResolvedValue(aiResult(config.workflow));
@@ -578,10 +666,15 @@ describe("run v2 orchestration", () => {
         request_id: "req-replay",
         run: runResource(config.workflow, "running"),
       });
-      apiMethods.getRun.mockResolvedValue({
-        request_id: "req-poll",
-        run: runResource(config.workflow),
-      });
+      apiMethods.getRun
+        .mockResolvedValue({
+          request_id: "req-poll",
+          run: runResource(config.workflow),
+        })
+        .mockResolvedValueOnce({
+          request_id: "req-current",
+          run: runResource(config.workflow, "running"),
+        });
       apiMethods.getResult.mockResolvedValue(aiResult(config.workflow));
 
       const promise = run();
@@ -604,10 +697,15 @@ describe("run v2 orchestration", () => {
         request_id: "req-replay",
         run: runResource(config.workflow, "queued"),
       });
-      apiMethods.getRun.mockResolvedValue({
-        request_id: "req-poll",
-        run: runResource(config.workflow, "failed"),
-      });
+      apiMethods.getRun
+        .mockResolvedValue({
+          request_id: "req-poll",
+          run: runResource(config.workflow, "failed"),
+        })
+        .mockResolvedValueOnce({
+          request_id: "req-current",
+          run: runResource(config.workflow, "queued"),
+        });
 
       const promise = run();
       await vi.advanceTimersByTimeAsync(1_000);
@@ -642,12 +740,16 @@ describe("run v2 orchestration", () => {
       apiMethods.createRun
         .mockResolvedValueOnce({
           request_id: "req-replay",
-          run: runResource(config.workflow, terminalStatus),
+          run: runResource(config.workflow, "queued"),
         })
         .mockResolvedValueOnce({
           request_id: "req-retry",
           run: retryRun,
         });
+      apiMethods.getRun.mockResolvedValue({
+        request_id: "req-current",
+        run: runResource(config.workflow, terminalStatus),
+      });
       apiMethods.getResult.mockResolvedValue(retryResult);
 
       await run();
@@ -669,14 +771,12 @@ describe("run v2 orchestration", () => {
         config.workflow,
         buildRunRequest(config),
         "certora-guardian-stable",
-        undefined,
       );
       expect(apiMethods.createRun).toHaveBeenNthCalledWith(
         2,
         config.workflow,
         buildRunRequest(config),
         "certora-guardian-attempt-2",
-        undefined,
       );
       expect(apiMethods.createRun).toHaveBeenCalledTimes(2);
       expect(apiMethods.getResult).toHaveBeenCalledWith(RETRY_RUN_ID);
@@ -696,6 +796,10 @@ describe("run v2 orchestration", () => {
         request_id: "req-retry",
         run: runResource(config.workflow, "failed"),
       });
+    apiMethods.getRun.mockResolvedValue({
+      request_id: "req-current",
+      run: runResource(config.workflow, "failed"),
+    });
 
     await run();
 
@@ -705,6 +809,79 @@ describe("run v2 orchestration", () => {
       "Certora run failed: Provider failed",
     );
     expect(apiMethods.getResult).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    aiConfig("ai-auditor-full"),
+    aiConfig("ai-auditor-diff"),
+    findingValidationConfig(),
+    standaloneConfig("auto-prover"),
+    standaloneConfig("auto-fuzzer"),
+  ])(
+    "refreshes a cached launch response before deciding whether to retry $workflow",
+    async (base) => {
+      const config = { ...base, githubRunAttempt: 2 };
+      getConfigMock.mockReturnValue(config);
+      apiMethods.createRun
+        .mockResolvedValueOnce({
+          request_id: "req-original-cached-202",
+          run: runResource(config.workflow, "queued"),
+        })
+        .mockResolvedValueOnce({
+          request_id: "req-retry",
+          run: { ...runResource(config.workflow, "failed"), id: RETRY_RUN_ID },
+        });
+      apiMethods.getRun.mockResolvedValue({
+        request_id: "req-current",
+        run: runResource(config.workflow, "failed"),
+      });
+
+      await run();
+
+      expect(apiMethods.getRun).toHaveBeenCalledExactlyOnceWith(RUN_ID);
+      expect(apiMethods.createRun).toHaveBeenCalledTimes(2);
+      expect(createIdempotencyKeyMock).toHaveBeenLastCalledWith(
+        config.workflow,
+        buildRunRequest(config),
+        `${config.idempotencySeed}:github-rerun-attempt:2`,
+      );
+      expect(apiMethods.getResult).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects a refreshed run with a different identity before a paid retry", async () => {
+    const config = { ...aiConfig(), githubRunAttempt: 2 };
+    getConfigMock.mockReturnValue(config);
+    apiMethods.createRun.mockResolvedValue({
+      request_id: "req-cached",
+      run: runResource(config.workflow, "queued"),
+    });
+    apiMethods.getRun.mockResolvedValue({
+      request_id: "req-current",
+      run: { ...runResource(config.workflow, "failed"), id: RETRY_RUN_ID },
+    });
+
+    await expect(run()).rejects.toThrow("different source");
+
+    expect(apiMethods.createRun).toHaveBeenCalledTimes(1);
+    expect(apiMethods.getResult).not.toHaveBeenCalled();
+    expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+  });
+
+  it("does not launch another run when the recovery refresh fails", async () => {
+    const config = { ...aiConfig(), githubRunAttempt: 2 };
+    getConfigMock.mockReturnValue(config);
+    apiMethods.createRun.mockResolvedValue({
+      request_id: "req-cached",
+      run: runResource(config.workflow, "queued"),
+    });
+    apiMethods.getRun.mockRejectedValue(new Error("Recovery unavailable"));
+
+    await expect(run()).rejects.toThrow("Recovery unavailable");
+
+    expect(apiMethods.createRun).toHaveBeenCalledTimes(1);
+    expect(apiMethods.getResult).not.toHaveBeenCalled();
+    expect(setOutputMock).toHaveBeenLastCalledWith("run-id", RUN_ID);
   });
 
   it("never includes the local GitHub token in a private launch", () => {
@@ -732,9 +909,10 @@ describe("run v2 orchestration", () => {
       context: ["contracts/**/*.sol"],
       finding: "Vault.withdraw() may be reentrant.",
     });
-    expect(apiMethods.estimateRun).toHaveBeenCalledWith(
+    expect(apiMethods.createRun).toHaveBeenCalledWith(
       "ai-auditor-finding-validation",
       expectedBody,
+      "certora-guardian-stable",
     );
     expect(setOutputMock).toHaveBeenCalledWith("validation-verdict", "VALID");
     expect(setOutputMock).toHaveBeenCalledWith("validation-severity", "HIGH");
@@ -742,15 +920,101 @@ describe("run v2 orchestration", () => {
       42,
       expect.stringContaining("Valid finding"),
       "<!-- certora-guardian-ci:ai-auditor-finding-validation -->",
+      HEAD_SHA,
+      RUN_ID,
     );
   });
 
-  it("stops before launch when the estimate cannot launch", async () => {
+  it("preserves a new manual-context launch rejection without polling or reporting a run", async () => {
     getConfigMock.mockReturnValue(aiConfig());
-    apiMethods.estimateRun.mockResolvedValue(estimate(false));
+    apiMethods.createRun.mockRejectedValue(new Error("insufficient_balance"));
 
-    await expect(run()).rejects.toThrow("minimum required $10.00");
-    expect(apiMethods.createRun).not.toHaveBeenCalled();
+    await expect(run()).rejects.toThrow("insufficient_balance");
+    expect(apiMethods.estimateRun).not.toHaveBeenCalled();
+    expect(apiMethods.createRun).toHaveBeenCalledOnce();
+    expect(apiMethods.getRun).not.toHaveBeenCalled();
+    expect(apiMethods.getResult).not.toHaveBeenCalled();
+    expect(
+      setOutputMock.mock.calls.filter(([key]) => key === "run-id"),
+    ).toEqual([["run-id", ""]]);
+  });
+
+  describe.each([1, 2])("recovery on GitHub attempt %i", (githubRunAttempt) => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    });
+
+    describe.each(["insufficient available balance", "estimator unavailable"])(
+      "with %s",
+      (estimateFailure) => {
+        it.each(
+          [
+            aiConfig("ai-auditor-full"),
+            aiConfig("ai-auditor-diff"),
+            findingValidationConfig(),
+            standaloneConfig("auto-prover"),
+            standaloneConfig("auto-fuzzer"),
+          ].flatMap((config) =>
+            (["queued", "succeeded"] as const).map((status) => ({
+              config,
+              status,
+            })),
+          ),
+        )(
+          "recovers $config.workflow in $status state without a separate estimate or duplicate launch",
+          async ({ config: base, status }) => {
+            const config = { ...base, githubRunAttempt };
+            getConfigMock.mockReturnValue(config);
+            if (estimateFailure === "estimator unavailable") {
+              apiMethods.estimateRun.mockRejectedValue(
+                new Error("Estimator unavailable"),
+              );
+            } else {
+              apiMethods.estimateRun.mockResolvedValue(estimate(false));
+            }
+            apiMethods.createRun.mockResolvedValue({
+              request_id: "req-recovered",
+              run: runResource(config.workflow, status),
+            });
+            apiMethods.getRun.mockResolvedValue({
+              request_id: "req-current",
+              run: runResource(config.workflow),
+            });
+            apiMethods.getResult.mockResolvedValue(
+              config.workflow === "auto-prover" ||
+                config.workflow === "auto-fuzzer"
+                ? standaloneResult(config.workflow)
+                : config.workflow === "ai-auditor-finding-validation"
+                  ? findingValidationResult()
+                  : aiResult(config.workflow),
+            );
+
+            const pending = run();
+            await vi.advanceTimersByTimeAsync(1_000);
+            await pending;
+
+            expect(apiMethods.estimateRun).not.toHaveBeenCalled();
+            expect(apiMethods.createRun).toHaveBeenCalledExactlyOnceWith(
+              config.workflow,
+              buildRunRequest(config),
+              "certora-guardian-stable",
+            );
+            expect(createIdempotencyKeyMock).toHaveBeenCalledExactlyOnceWith(
+              config.workflow,
+              buildRunRequest(config),
+              config.idempotencySeed,
+            );
+            expect(apiMethods.getResult).toHaveBeenCalledExactlyOnceWith(
+              RUN_ID,
+            );
+            expect(setOutputMock).toHaveBeenCalledWith("status", "succeeded");
+            expect(setFailedMock).not.toHaveBeenCalled();
+          },
+        );
+      },
+    );
   });
 
   it("polls only the canonical run resource until success", async () => {
@@ -845,6 +1109,156 @@ describe("run v2 orchestration", () => {
     }
   });
 
+  it("shares one deadline between a slow launch and polling, without a fresh polling budget", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.now();
+      const config = { ...aiConfig(), pollInterval: 60, timeout: 1 };
+      getConfigMock.mockReturnValue(config);
+      apiMethods.createRun.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(
+              () =>
+                resolve({
+                  request_id: "req-slow-launch",
+                  run: runResource(config.workflow, "running"),
+                }),
+              45_000,
+            );
+          }),
+      );
+
+      const pending = run();
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect(AutoProverApi).toHaveBeenCalledWith(
+        config.apiBaseUrl,
+        config.apiKey,
+        startedAt + 60_000,
+      );
+      expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await pending;
+
+      expect(Date.now()).toBe(startedAt + 60_000);
+      expect(apiMethods.cancelRun).toHaveBeenCalledExactlyOnceWith(
+        RUN_ID,
+        startedAt + 75_000,
+      );
+      expect(apiMethods.getRun).not.toHaveBeenCalled();
+      expect(apiMethods.estimateRun).not.toHaveBeenCalled();
+      expect(setFailedMock).toHaveBeenCalledWith(
+        expect.stringContaining("timed out after 1 minute"),
+      );
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reset the overall deadline for an attempt-scoped paid retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.now();
+      const config = {
+        ...aiConfig(),
+        githubRunAttempt: 2,
+        pollInterval: 60,
+        timeout: 1,
+      };
+      getConfigMock.mockReturnValue(config);
+      apiMethods.createRun
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              setTimeout(
+                () =>
+                  resolve({
+                    request_id: "req-slow-recovery",
+                    run: runResource(config.workflow, "queued"),
+                  }),
+                45_000,
+              );
+            }),
+        )
+        .mockResolvedValueOnce({
+          request_id: "req-retry",
+          run: { ...runResource(config.workflow, "running"), id: RETRY_RUN_ID },
+        });
+      apiMethods.getRun.mockResolvedValue({
+        request_id: "req-failed",
+        run: runResource(config.workflow, "failed"),
+      });
+      apiMethods.cancelRun.mockResolvedValue({
+        request_id: "req-cancel",
+        run: {
+          ...runResource(config.workflow, "cancelling"),
+          id: RETRY_RUN_ID,
+        },
+      });
+
+      const pending = run();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await pending;
+
+      expect(apiMethods.createRun).toHaveBeenCalledTimes(2);
+      expect(apiMethods.cancelRun).toHaveBeenCalledExactlyOnceWith(
+        RETRY_RUN_ID,
+        startedAt + 75_000,
+      );
+      expect(Date.now()).toBe(startedAt + 60_000);
+      expect(apiMethods.getResult).not.toHaveBeenCalled();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["failed", "cancelled"] as const)(
+    "does not issue a new paid retry when recovering %s consumes the entire deadline",
+    async (status) => {
+      vi.useFakeTimers();
+      try {
+        const config = { ...aiConfig(), githubRunAttempt: 2, timeout: 1 };
+        getConfigMock.mockReturnValue(config);
+        apiMethods.createRun.mockResolvedValue({
+          request_id: "req-cached",
+          run: runResource(config.workflow, "queued"),
+        });
+        apiMethods.getRun.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              setTimeout(
+                () =>
+                  resolve({
+                    request_id: "req-recovered",
+                    run: runResource(config.workflow, status),
+                  }),
+                60_000,
+              );
+            }),
+        );
+
+        const pending = expect(run()).rejects.toMatchObject({
+          name: "AutoProverApiDeadlineError",
+        });
+        await vi.advanceTimersByTimeAsync(60_000);
+        await pending;
+
+        expect(apiMethods.createRun).toHaveBeenCalledOnce();
+        expect(createIdempotencyKeyMock).toHaveBeenCalledOnce();
+        expect(apiMethods.getResult).not.toHaveBeenCalled();
+        expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+        expect(setOutputMock).toHaveBeenCalledWith("run-id", RUN_ID);
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("processes a run that wins the timeout cancellation race", async () => {
     vi.useFakeTimers();
     try {
@@ -880,7 +1294,6 @@ describe("run v2 orchestration", () => {
   it("binds AutoProver delivery at launch and commits with an empty API call", async () => {
     const config = standaloneConfig("auto-prover");
     getConfigMock.mockReturnValue(config);
-    apiMethods.estimateRun.mockResolvedValue(estimate(true, ESTIMATE_QUOTE_ID));
     apiMethods.createRun.mockResolvedValue({
       request_id: "req",
       run: runResource(config.workflow),
@@ -898,13 +1311,19 @@ describe("run v2 orchestration", () => {
       config.workflow,
       buildRunRequest(config),
       "certora-guardian-stable",
-      ESTIMATE_QUOTE_ID,
     );
     expect(apiMethods.getResult).toHaveBeenCalledWith(RUN_ID);
     expect(apiMethods.commitGeneratedFiles.mock.calls[0]).toHaveLength(1);
     expect(setOutputMock).toHaveBeenCalledWith(
       "generated-files",
       "certora/Vault.spec",
+    );
+    expect(upsertPrCommentMock).toHaveBeenCalledWith(
+      42,
+      expect.any(String),
+      "<!-- certora-guardian-ci:auto-prover -->",
+      commit.delivery.commit_sha,
+      RUN_ID,
     );
   });
 
@@ -949,7 +1368,47 @@ describe("run v2 orchestration", () => {
     expect(apiMethods.createRun).not.toHaveBeenCalled();
     expect(apiMethods.getRun).toHaveBeenCalledWith(RUN_ID);
     expect(apiMethods.commitGeneratedFiles).toHaveBeenCalledWith(RUN_ID);
+    expect(upsertPrCommentMock).toHaveBeenCalledWith(
+      42,
+      expect.any(String),
+      "<!-- certora-guardian-ci:auto-prover -->",
+      HEAD_SHA,
+      RUN_ID,
+    );
   });
+
+  it.each(["auto-prover", "auto-fuzzer"] as const)(
+    "binds %s's unchanged delivery summary to the source head and canonical audit",
+    async (workflow) => {
+      const config = standaloneConfig(workflow);
+      getConfigMock.mockReturnValue(config);
+      apiMethods.createRun.mockResolvedValue({
+        request_id: "req",
+        run: runResource(workflow),
+      });
+      apiMethods.getResult.mockResolvedValue(standaloneResult(workflow));
+      apiMethods.commitGeneratedFiles.mockResolvedValue({
+        request_id: "req-no-changes",
+        delivery: {
+          status: "no_changes",
+          commit_sha: null,
+          files: [],
+          renamed_files: [],
+        },
+      });
+
+      await run();
+
+      expect(upsertPrCommentMock).toHaveBeenCalledExactlyOnceWith(
+        42,
+        expect.any(String),
+        `<!-- certora-guardian-ci:${workflow} -->`,
+        HEAD_SHA,
+        RUN_ID,
+      );
+      expect(setOutputMock).toHaveBeenCalledWith("generated-commit-sha", "");
+    },
+  );
 
   it("fails closed when a result belongs to another run", async () => {
     const config = aiConfig();

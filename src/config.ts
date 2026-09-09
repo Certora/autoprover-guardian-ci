@@ -48,8 +48,63 @@ function parseCommaSeparated(input: string): string[] {
     .filter(Boolean);
 }
 
+function parsePatternInput(input: string, name: string): string[] {
+  const value = input.trim();
+  if (!value) return [];
+
+  if (value.startsWith("[")) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      // A leading character class or literal bracket filename is still a
+      // legacy glob. A leading JSON string (or unfinished array) is not:
+      // never silently reinterpret a malformed explicit context as a glob.
+      if (/^\[\s*(?:"|$)/.test(value)) {
+        throw new Error(`${name} must be a valid JSON array of pattern strings.`);
+      }
+    }
+    if (Array.isArray(parsed)) {
+      if (parsed.some((pattern) => typeof pattern !== "string" || !pattern.trim())) {
+        throw new Error(`${name} must be a JSON array of non-empty pattern strings.`);
+      }
+      return (parsed as string[]).map((pattern) => pattern.trim());
+    }
+  }
+
+  // Preserve commas inside brace globs, character classes, and extglobs.
+  // JSON arrays are the unambiguous format for literal comma filenames.
+  const patterns: string[] = [];
+  const closing: string[] = [];
+  let start = 0;
+  let escaped = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === "{" || character === "[" || character === "(") {
+      closing.push(character === "{" ? "}" : character === "[" ? "]" : ")");
+    } else if (character === closing.at(-1)) {
+      closing.pop();
+    } else if (character === "," && closing.length === 0) {
+      patterns.push(value.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  // Keep historical CSV behavior for unbalanced literal path punctuation.
+  if (closing.length > 0) return parseCommaSeparated(value);
+  patterns.push(value.slice(start).trim());
+  return patterns.filter(Boolean);
+}
+
 function parseApiPatternList(input: string, name: string): string[] {
-  const patterns = parseCommaSeparated(input);
+  const patterns = parsePatternInput(input, name);
   if (patterns.length > PATTERN_ARRAY_MAX) {
     throw new Error(
       `${name} must contain at most ${PATTERN_ARRAY_MAX} patterns.`,

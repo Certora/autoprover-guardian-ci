@@ -11,12 +11,46 @@ import {
 import { formatIssueTitle, formatIssueBody } from "./format";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
+type PrIssueComment = {
+  id: number;
+  node_id: string;
+  body?: string | null;
+};
+type CommentOwnershipResponse = {
+  nodes: ({
+    id: string;
+    body: string;
+    viewerDidAuthor: boolean;
+  } | null)[];
+};
 
-// These protocol aliases must remain readable because generated commits and
-// pull-request comments are immutable external state. Removing either alias
-// can launch a duplicate paid run or create a duplicate summary comment.
+// Generated commits are immutable external state. Removing this protocol alias
+// can launch a duplicate paid run when an older generated commit is revisited.
 const LEGACY_GENERATED_RUN_TRAILER = "Zeus-Guardian-Job";
-const LEGACY_PR_COMMENT_MARKER = "<!-- zeus-guardian-ci -->";
+
+function hasLeadingCommentMarker(
+  body: string | null | undefined,
+  marker: string,
+): boolean {
+  // Report Markdown can itself quote a different workflow's marker. Only the
+  // first line is protocol metadata; never treat report contents as identity.
+  return body?.split(/\r?\n/, 1)[0] === marker;
+}
+
+function githubFailureSummary(error: unknown): string {
+  // Octokit errors may include response bodies or request details. Keep useful
+  // status information without copying credentials or repository content to CI.
+  const status =
+    error && typeof error === "object" && "status" in error
+      ? error.status
+      : undefined;
+  return typeof status === "number" &&
+    Number.isInteger(status) &&
+    status >= 400 &&
+    status <= 599
+    ? ` (GitHub HTTP ${status})`
+    : "";
+}
 
 function generatedRunIdFromCommitMessage(message: string): string | null {
   const lines = message.split(/\r?\n/);
@@ -91,6 +125,9 @@ export class GitHubClient {
   }
 
   async findExistingIssue(finding: Finding): Promise<number | null> {
+    // Finding IDs originate in model output, not trusted query syntax. Unusual
+    // IDs remain publishable, but must not introduce GitHub search qualifiers.
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(finding.id)) return null;
     const title = formatIssueTitle(finding);
     const legacyTitle = `[Auto Prover] ${finding.severity}: ${finding.title} (${finding.id})`;
     try {
@@ -104,13 +141,18 @@ export class GitHubClient {
       });
 
       for (const issue of data.items) {
-        if (issue.title === title || issue.title === legacyTitle) {
+        if (
+          issue.repository_url.toLowerCase() ===
+            `https://api.github.com/repos/${this.owner}/${this.repo}`.toLowerCase() &&
+          !issue.pull_request &&
+          (issue.title === title || issue.title === legacyTitle)
+        ) {
           return issue.number;
         }
       }
     } catch (error) {
       core.warning(
-        `Failed to search for existing issues: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to search for existing issues${githubFailureSummary(error)}.`,
       );
     }
     return null;
@@ -156,7 +198,7 @@ export class GitHubClient {
       return `#${issue.number}`;
     } catch (error) {
       core.warning(
-        `Failed to create/update issue for ${finding.id}: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to create/update finding issue${githubFailureSummary(error)}.`,
       );
       return null;
     }
@@ -166,10 +208,33 @@ export class GitHubClient {
     prNumber: number,
     body: string,
     marker = PR_COMMENT_MARKER,
+    expectedHeadSha: string,
+    runId: string,
   ): Promise<void> {
     try {
-      // Search for existing comment with our marker
-      const comments = await this.octokit.paginate(
+      if (
+        !SHA_REGEX.test(expectedHeadSha) ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          runId,
+        ) ||
+        !marker.endsWith(" -->") ||
+        !hasLeadingCommentMarker(body, marker)
+      ) {
+        throw new Error("Invalid immutable PR comment identity.");
+      }
+
+      // GitHub has no atomic head-conditional comment update. Scope identity to
+      // both the immutable head and canonical paid audit so an older run cannot
+      // overwrite another result even if the head changes after our final GET.
+      // Legacy unscoped summaries are deliberately left untouched.
+      const scopedMarker = marker.replace(
+        / -->$/,
+        `:head:${expectedHeadSha}:run:${runId.toLowerCase()} -->`,
+      );
+      const scopedBody = scopedMarker + body.slice(marker.length);
+      if (!(await this.isCurrentPrHead(prNumber, expectedHeadSha))) return;
+
+      const comments: PrIssueComment[] = await this.octokit.paginate(
         this.octokit.rest.issues.listComments,
         {
           owner: this.owner,
@@ -179,24 +244,46 @@ export class GitHubClient {
         },
       );
 
-      const fallbackMarkers =
-        marker === PR_COMMENT_MARKER
-          ? [LEGACY_PR_COMMENT_MARKER]
-          : [PR_COMMENT_MARKER, LEGACY_PR_COMMENT_MARKER];
-      const existing =
-        comments.find((comment) => comment.body?.includes(marker)) ??
-        comments.find((comment) =>
-          fallbackMarkers.some((fallback) =>
-            comment.body?.includes(fallback),
-          ),
+      const candidates = comments.filter((comment) =>
+        hasLeadingCommentMarker(comment.body, scopedMarker),
+      );
+      let existing: (typeof candidates)[number] | undefined;
+      for (let offset = 0; offset < candidates.length; offset += 100) {
+        const batch = candidates.slice(offset, offset + 100);
+        // Ask GitHub about the authenticated viewer, rather than trusting a
+        // public marker, author login, bot type, or repository role. This works
+        // for GITHUB_TOKEN, installation tokens, and personal access tokens.
+        const response: CommentOwnershipResponse =
+          await this.octokit.graphql<CommentOwnershipResponse>(
+            `query GuardianCommentOwnership($ids: [ID!]!) {
+            nodes(ids: $ids) {
+              ... on IssueComment { id body viewerDidAuthor }
+            }
+          }`,
+            { ids: batch.map((comment) => comment.node_id) },
+          );
+        const owned = response.nodes.find(
+          (comment) =>
+            comment?.viewerDidAuthor === true &&
+            hasLeadingCommentMarker(comment.body, scopedMarker) &&
+            batch.some((candidate) => candidate.node_id === comment.id),
         );
+        if (owned) {
+          existing = batch.find((comment) => comment.node_id === owned.id);
+          break;
+        }
+      }
+
+      // Pagination and identity verification can take time. Recheck just before
+      // mutation; a late old-head result should normally publish nothing.
+      if (!(await this.isCurrentPrHead(prNumber, expectedHeadSha))) return;
 
       if (existing) {
         await this.octokit.rest.issues.updateComment({
           owner: this.owner,
           repo: this.repo,
           comment_id: existing.id,
-          body,
+          body: scopedBody,
         });
         core.info(`Updated existing PR comment #${existing.id}`);
       } else {
@@ -204,15 +291,33 @@ export class GitHubClient {
           owner: this.owner,
           repo: this.repo,
           issue_number: prNumber,
-          body,
+          body: scopedBody,
         });
         core.info(`Created new PR comment on #${prNumber}`);
       }
     } catch (error) {
       core.warning(
-        `Failed to upsert PR comment: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to upsert PR comment${githubFailureSummary(error)}.`,
       );
     }
+  }
+
+  private async isCurrentPrHead(
+    prNumber: number,
+    expectedHeadSha: string,
+  ): Promise<boolean> {
+    const { data } = await this.octokit.rest.pulls.get({
+      owner: this.owner,
+      repo: this.repo,
+      pull_number: prNumber,
+    });
+    if (data.head.sha !== expectedHeadSha) {
+      core.info(
+        "Skipped PR summary because the pull request head has changed.",
+      );
+      return false;
+    }
+    return true;
   }
 
   async getGeneratedFollowup(

@@ -19,13 +19,14 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@actions/core": "^1.11.1",
-    "@actions/github": "^6.0.0"
+    "@actions/core": "^2.0.3",
+    "@actions/github": "^8.0.1"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
     "@vercel/ncc": "^0.38.3",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
   }
 }

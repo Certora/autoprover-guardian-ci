@@ -3,6 +3,7 @@ import {
   createIdempotencyKey,
   getAutoProverApiErrorMessage,
   AutoProverApi,
+  AutoProverApiDeadlineError,
   AutoProverApiError,
 } from "../src/api";
 import type {
@@ -195,31 +196,69 @@ describe("AutoProverApi v2", () => {
 
   it("keeps omitted-mode idempotency stable and distinguishes explicit model modes", () => {
     const legacy = createIdempotencyKey("ai-auditor-full", body, "stable-seed");
-    expect(createIdempotencyKey("ai-auditor-full", { ...body, model_mode: undefined }, "stable-seed")).toBe(legacy);
-    const normal = createIdempotencyKey("ai-auditor-full", { ...body, model_mode: "normal" }, "stable-seed");
-    const frontier = createIdempotencyKey("ai-auditor-full", { ...body, model_mode: "frontier" }, "stable-seed");
+    expect(
+      createIdempotencyKey(
+        "ai-auditor-full",
+        { ...body, model_mode: undefined },
+        "stable-seed",
+      ),
+    ).toBe(legacy);
+    const normal = createIdempotencyKey(
+      "ai-auditor-full",
+      { ...body, model_mode: "normal" },
+      "stable-seed",
+    );
+    const frontier = createIdempotencyKey(
+      "ai-auditor-full",
+      { ...body, model_mode: "frontier" },
+      "stable-seed",
+    );
     expect(frontier).not.toBe(normal);
     expect(frontier).not.toBe(legacy);
-    expect(createIdempotencyKey("ai-auditor-full", { ...body, model_mode: "frontier" }, "stable-seed")).toBe(frontier);
+    expect(
+      createIdempotencyKey(
+        "ai-auditor-full",
+        { ...body, model_mode: "frontier" },
+        "stable-seed",
+      ),
+    ).toBe(frontier);
   });
 
-  it.each([undefined, null, "normal", "frontier"])("accepts optional recorded model mode %j", async (modelMode) => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ request_id: "req-mode", run: { ...run, model_mode: modelMode } }), { status: 200 }),
-    );
-    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+  it.each([undefined, null, "normal", "frontier"])(
+    "accepts optional recorded model mode %j",
+    async (modelMode) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            request_id: "req-mode",
+            run: { ...run, model_mode: modelMode },
+          }),
+          { status: 200 },
+        ),
+      );
+      const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
-    expect((await api.getRun(run.id)).run.model_mode).toBe(modelMode);
-  });
+      expect((await api.getRun(run.id)).run.model_mode).toBe(modelMode);
+    },
+  );
 
-  it.each(["fast", 1, {}, ""])("rejects invalid recorded model mode %j", async (modelMode) => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ request_id: "req-mode", run: { ...run, model_mode: modelMode } }), { status: 200 }),
-    );
-    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+  it.each(["fast", 1, {}, ""])(
+    "rejects invalid recorded model mode %j",
+    async (modelMode) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            request_id: "req-mode",
+            run: { ...run, model_mode: modelMode },
+          }),
+          { status: 200 },
+        ),
+      );
+      const api = new AutoProverApi("https://app.certora.com", "certora_test");
 
-    await expect(api.getRun(run.id)).rejects.toThrow("malformed run");
-  });
+      await expect(api.getRun(run.id)).rejects.toThrow("malformed run");
+    },
+  );
 
   it.each<[Workflow, string]>([
     ["ai-auditor-full", "/v2/ai-auditor-full-runs"],
@@ -281,6 +320,477 @@ describe("AutoProverApi v2", () => {
 
     await expect(promise).resolves.toMatchObject({ run: { id: run.id } });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves the body, launch key, quote and redirect protection after a network failure", async () => {
+    vi.useFakeTimers();
+    const proverBody: RunRequest = {
+      source: body.source,
+      contract: { path: "contracts/Token.sol", name: "Token" },
+      delivery: { type: "github_pull_request", pull_request_number: 7 },
+    };
+    const proverRun: Run = {
+      ...run,
+      run_type: "auto_prover",
+      delivery: {
+        type: "github_pull_request",
+        pull_request_number: 7,
+        status: "pending",
+        outcome: null,
+        commit_sha: null,
+        files: [],
+        renamed_files: [],
+        error: null,
+      },
+    };
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ request_id: "req-retry", run: proverRun }),
+          { status: 202 },
+        ),
+      );
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+    const quoteId = "22222222-2222-4222-8222-222222222222";
+    const promise = api.createRun(
+      "auto-prover",
+      proverBody,
+      "same-launch-key",
+      quoteId,
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(promise).resolves.toMatchObject({ run: { id: run.id } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const [url, options] of fetchMock.mock.calls) {
+      expect(url).toBe("https://app.certora.com/v2/auto-prover-runs");
+      expect(options).toMatchObject({
+        method: "POST",
+        body: JSON.stringify(proverBody),
+        redirect: "error",
+        headers: {
+          Authorization: "Bearer certora_test",
+          "Idempotency-Key": "same-launch-key",
+          "Estimate-Quote-Id": quoteId,
+        },
+      });
+    }
+  });
+
+  it.each(["2", "Wed, 09 Sep 2026 12:00:02 GMT"])(
+    "honors Retry-After %s while recovering the same in-progress launch",
+    async (retryAfter) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-09-09T12:00:00Z"));
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              status: 409,
+              code: "idempotency_in_progress",
+              detail: "This launch is still being processed.",
+              retryable: true,
+              request_id: "req-pending",
+            }),
+            {
+              status: 409,
+              headers: {
+                "Content-Type": "application/problem+json",
+                "Retry-After": retryAfter,
+              },
+            },
+          ),
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ request_id: "req-recovered", run }), {
+            status: 202,
+          }),
+        );
+      const api = new AutoProverApi("https://app.certora.com", "certora_test");
+      const promise = api.createRun("ai-auditor-full", body, "same-launch-key");
+
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(promise).resolves.toMatchObject({ run: { id: run.id } });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[1]?.[1]?.headers).toMatchObject({
+        "Idempotency-Key": "same-launch-key",
+      });
+    },
+  );
+
+  it("does not retry an explicit non-retryable problem even with a server-error HTTP status", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          status: 503,
+          code: "launch_rejected",
+          detail: "Do not repeat this request.",
+          retryable: false,
+          request_id: "req-rejected",
+        }),
+        {
+          status: 503,
+          headers: { "Content-Type": "application/problem+json" },
+        },
+      ),
+    );
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+
+    await expect(
+      api.createRun("ai-auditor-full", body, "same-launch-key"),
+    ).rejects.toMatchObject({
+      code: "launch_rejected",
+      statusCode: 503,
+      retryable: false,
+      requestId: "req-rejected",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers an accepted launch after a timeout and more than three pending responses", async () => {
+    vi.useFakeTimers();
+    const start = Date.now();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementationOnce(
+        (_url, options) =>
+          new Promise((_resolve, reject) => {
+            options?.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          }),
+      )
+      .mockImplementation(() =>
+        Promise.resolve(
+          Date.now() < start + 85_000
+            ? new Response(
+                JSON.stringify({
+                  status: 409,
+                  code: "idempotency_in_progress",
+                  detail: "Still preparing",
+                  retryable: true,
+                }),
+                {
+                  status: 409,
+                  headers: { "Retry-After": "2" },
+                },
+              )
+            : new Response(
+                JSON.stringify({ request_id: "req-recovered", run }),
+                { status: 202 },
+              ),
+        ),
+      );
+    const api = new AutoProverApi(
+      "https://app.certora.com",
+      "certora_test",
+      start + 120_000,
+    );
+    const pending = api.createRun("ai-auditor-full", body, "stable-launch");
+
+    await vi.advanceTimersByTimeAsync(85_000);
+
+    await expect(pending).resolves.toMatchObject({ run: { id: run.id } });
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(4);
+    for (const [, options] of fetchMock.mock.calls) {
+      expect(options?.body).toBe(JSON.stringify(body));
+      expect(new Headers(options?.headers).get("Idempotency-Key")).toBe(
+        "stable-launch",
+      );
+    }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["300", "Wed, 09 Sep 2026 12:05:00 GMT"])(
+    "does not shorten a long Retry-After value %s",
+    async (retryAfter) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-09-09T12:00:00Z"));
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              status: 429,
+              code: "rate_limit_exceeded",
+              detail: "Wait",
+              retryable: true,
+            }),
+            {
+              status: 429,
+              headers: { "Retry-After": retryAfter },
+            },
+          ),
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ request_id: "req-after-reset", run }), {
+            status: 202,
+          }),
+        );
+      const api = new AutoProverApi(
+        "https://app.certora.com",
+        "certora_test",
+        Date.now() + 600_000,
+      );
+      const pending = api.createRun("ai-auditor-full", body, "stable-launch");
+
+      await vi.advanceTimersByTimeAsync(299_999);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toMatchObject({ run: { id: run.id } });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("stops launch recovery exactly at the shared deadline without changing its key", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      (_url, options) =>
+        new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        }),
+    );
+    const api = new AutoProverApi(
+      "https://app.certora.com",
+      "certora_test",
+      Date.now() + 70_000,
+    );
+    const pending = api
+      .createRun("ai-auditor-full", body, "stable-launch")
+      .catch((error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(70_000);
+
+    expect(await pending).toBeInstanceOf(AutoProverApiDeadlineError);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const [, options] of fetchMock.mock.calls) {
+      expect(new Headers(options?.headers).get("Idempotency-Key")).toBe(
+        "stable-launch",
+      );
+    }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("fails with reset guidance without an early retry when Retry-After exceeds the budget", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            status: 429,
+            code: "rate_limit_exceeded",
+            detail: "Wait",
+            retryable: true,
+          }),
+          { status: 429, headers: { "Retry-After": "3600" } },
+        ),
+      );
+    const api = new AutoProverApi(
+      "https://app.certora.com",
+      "certora_test",
+      Date.now() + 600_000,
+    );
+
+    await expect(
+      api.createRun("ai-auditor-full", body, "stable-launch"),
+    ).rejects.toThrow("retry after 3600 seconds");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds zero-delay server retries instead of spinning", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            status: 503,
+            code: "pending",
+            detail: "Wait",
+            retryable: true,
+          }),
+          {
+            status: 503,
+            headers: { "Retry-After": "0" },
+          },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ request_id: "req-recovered", run }), {
+          status: 202,
+        }),
+      );
+    const api = new AutoProverApi(
+      "https://app.certora.com",
+      "certora_test",
+      Date.now() + 60_000,
+    );
+    const pending = api.createRun("ai-auditor-full", body, "stable-launch");
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toMatchObject({ run: { id: run.id } });
+  });
+
+  it("honors a status response Retry-After even when the ordinary retry count is exhausted", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new TypeError("network unavailable"))
+      .mockRejectedValueOnce(new TypeError("network unavailable"))
+      .mockRejectedValueOnce(new TypeError("network unavailable"))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            status: 429,
+            code: "rate_limit_exceeded",
+            detail: "Wait",
+            retryable: true,
+          }),
+          {
+            status: 429,
+            headers: { "Retry-After": "120" },
+          },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ request_id: "req-after-reset", run }), {
+          status: 200,
+        }),
+      );
+    const api = new AutoProverApi(
+      "https://app.certora.com",
+      "certora_test",
+      Date.now() + 300_000,
+    );
+    const pending = api.getRun(run.id);
+
+    await vi.advanceTimersByTimeAsync(126_999);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toMatchObject({ run: { id: run.id } });
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it("uses the shared deadline for result and generated-file requests, with an explicit cancellation grace override", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ request_id: "req-cancel", run }), {
+          status: 202,
+        }),
+      );
+    const api = new AutoProverApi(
+      "https://app.certora.com",
+      "certora_test",
+      Date.now() - 1,
+    );
+
+    await expect(api.getResult(run.id)).rejects.toBeInstanceOf(
+      AutoProverApiDeadlineError,
+    );
+    await expect(api.commitGeneratedFiles(run.id)).rejects.toBeInstanceOf(
+      AutoProverApiDeadlineError,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(
+      api.cancelRun(run.id, Date.now() + 15_000),
+    ).resolves.toMatchObject({ run: { id: run.id } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves the HTTP error and does not expose malformed upstream error bodies", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("<html>private upstream diagnostics</html>", {
+        status: 403,
+        statusText: "Forbidden",
+        headers: { "Content-Type": "text/html" },
+      }),
+    );
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+
+    await expect(api.getRun(run.id)).rejects.toMatchObject({
+      code: "unknown_error",
+      statusCode: 403,
+      message: "HTTP 403: Forbidden",
+      retryable: false,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send credentials or make a request after the caller deadline", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+
+    await expect(api.getRun(run.id, Date.now() - 1)).rejects.toBeInstanceOf(
+      AutoProverApiDeadlineError,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("aborts an in-flight request at the caller deadline without retrying", async () => {
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | null | undefined;
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((_url, options) => {
+        requestSignal = options?.signal;
+        return new Promise((_resolve, reject) => {
+          requestSignal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      });
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+    const result = api
+      .getRun(run.id, Date.now() + 250)
+      .catch((error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(250);
+    expect(await result).toBeInstanceOf(AutoProverApiDeadlineError);
+    expect(requestSignal?.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not let a server retry delay overrun the caller deadline", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          status: 429,
+          code: "rate_limit_exceeded",
+          detail: "Try later",
+          retryable: true,
+        }),
+        { status: 429, headers: { "Retry-After": "30" } },
+      ),
+    );
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+    const result = api
+      .getRun(run.id, Date.now() + 250)
+      .catch((error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(250);
+    expect(await result).toBeInstanceOf(AutoProverApiDeadlineError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("uses the canonical run resource and never a progress route", async () => {
@@ -386,6 +896,33 @@ describe("AutoProverApi v2", () => {
       result: { run_type: "ai_auditor_finding_validation", data: { report } },
     });
   });
+
+  it.each(["", "not-a-run-id", "../../other-resource"])(
+    "rejects a non-UUID result identity %j",
+    async (runId) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            request_id: "req-result",
+            result: {
+              schema_version: "1",
+              run_id: runId,
+              run_type: "ai_auditor_finding_validation",
+              data: {
+                report: { format: "json", content: { final_verdict: "VALID" } },
+              },
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+      const api = new AutoProverApi("https://app.certora.com", "certora_test");
+
+      await expect(api.getResult(run.id)).rejects.toThrow(
+        "malformed run result",
+      );
+    },
+  );
 
   it.each([
     {

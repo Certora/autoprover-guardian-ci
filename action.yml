@@ -22,7 +22,7 @@ inputs:
     default: ""
 
   context:
-    description: "AI Auditor only: optional comma-separated context override (maximum 500 characters per pattern). Empty selects context on the server during launch; no preview required."
+    description: "AI Auditor only: optional context override as a JSON string array or legacy comma-separated patterns (maximum 500 characters per pattern). Use JSON for paths containing commas. Empty selects context on the server during launch; no preview required."
     required: false
     default: ""
 
@@ -41,7 +41,7 @@ inputs:
     default: "https://app.certora.com"
 
   scope:
-    description: "Full AI Auditor only: comma-separated audit scope patterns; required when context is empty. With explicit context, scope is an optional subset to focus on. Diff audits use the immutable diff as scope."
+    description: "Full AI Auditor only: audit scope as a JSON string array or legacy comma-separated patterns; required when context is empty. Use JSON for paths containing commas. With explicit context, scope is an optional subset to focus on. Diff audits use the immutable diff as scope."
     required: false
 
   instructions:

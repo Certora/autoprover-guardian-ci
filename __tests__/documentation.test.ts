@@ -83,6 +83,25 @@ describe("published v2 documentation", () => {
     expect(readme).toContain("organization_github_app");
   });
 
+  it("documents durable recovery without a blocking client estimate", () => {
+    const normalizedReadme = readme.replace(/\s+/g, " ");
+    expect(normalizedReadme).toContain("All workflows are submitted directly");
+    expect(normalizedReadme).toContain("no longer expire merely with age");
+    expect(normalizedReadme).toContain("same organization, API key, endpoint, idempotency key, and body");
+    expect(normalizedReadme).toContain("`timeout` is a shared budget");
+    expect(normalizedReadme).toContain("`Retry-After` is respected");
+    expect(normalizedReadme).not.toContain("runs are estimated first");
+  });
+
+  it("documents structured pattern inputs and authenticated per-audit summaries", () => {
+    const normalizedReadme = readme.replace(/\s+/g, " ");
+    expect(normalizedReadme).toContain("Both `context` and `scope` accept JSON string arrays");
+    expect(readme).toContain('context: \'["contracts/Exchange,old.sol"');
+    expect(normalizedReadme).toContain("Legacy CSV remains supported");
+    expect(normalizedReadme).toContain("authenticated token identity");
+    expect(normalizedReadme).toContain("canonical audit run");
+  });
+
   it("documents run terminology, commit binding, and the exact trailer", () => {
     expect(readme).toContain("`run-id`");
     expect(action).toContain("run-id:");

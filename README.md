@@ -8,11 +8,12 @@ AutoProver Guardian CI runs one Certora workflow for every pull request:
 - `auto-prover`
 - `auto-fuzzer`
 
-The action uses the public `/v2` run API. Automatic-context AI Auditor runs are
-submitted in one launch request, without a separate estimate or preview.
-Explicit-context AI Auditor, AutoProver, and AutoFuzzer runs are estimated first.
-Launches use a deterministic `Idempotency-Key`; the optional AISS
-`Estimate-Quote-Id` is forwarded automatically without a workflow input.
+The action uses the public `/v2` run API. All workflows are submitted directly,
+without a separate estimate or preview. Launches use a deterministic
+`Idempotency-Key`: the server recovers an existing run before billing checks,
+and validates source, calculates pricing, and reserves balance for new runs.
+The public API still supports optional estimates and the AISS
+`Estimate-Quote-Id` header for other callers; Guardian does not need either.
 Guardian polls the canonical run resource until it succeeds, fails, or is
 cancelled. There is no separate progress endpoint.
 
@@ -31,7 +32,7 @@ finding. Guardian never replaces empty context with every repository file or
 a locally generated list of changed files. The server checks balance and
 reserves the required amount before starting the audit.
 
-An explicit `context` remains an override: select comma-separated globs that
+An explicit `context` remains an override: select JSON arrays or comma-separated globs that
 include the audited code and relevant dependencies. For full audits, an optional
 `scope` focuses on a subset of that context; without it, the explicit context
 is the scope. For diff audits, explicit context also filters the diff, so keep
@@ -97,7 +98,7 @@ Finding validation supports both model modes but has no DeepDive iterations.
 
 Leave `model-mode` empty to use Normal without changing existing launch bodies
 or idempotency keys. An explicit selection is forwarded as `model_mode` in
-launch and any estimate, so both use that same mode. Guardian
+every launch and retry. Guardian
 never retries by removing or downgrading the requested mode. AutoProver and
 AutoFuzzer reject this AI Auditor-only input.
 
@@ -165,8 +166,22 @@ output in a later workflow step when repository policy should fail on it.
     context: "src/**/*.py,lib/**/*.py"
 ```
 
-This override is sent unchanged and estimated before launch; it does not invoke
+This override is sent to the server during launch; it does not invoke
 automatic context selection.
+
+Both `context` and `scope` accept JSON string arrays. Prefer JSON for literal
+comma filenames or complex globs; the SaaS installer emits it automatically
+when needed:
+
+```yaml
+context: '["contracts/Exchange,old.sol","src/**/*.{ts,tsx}","!src/tests/**"]'
+scope: '["contracts/Exchange,old.sol"]'
+```
+
+Legacy CSV remains supported, including commas inside brace globs, character
+classes, and extglobs. Leading/trailing pattern whitespace is normalized, as in
+the public API. JSON arrays must contain non-empty strings; malformed JSON
+arrays are rejected rather than silently changing the audit selection.
 
 ### AutoProver
 
@@ -217,22 +232,48 @@ expected.
 
 ## Reliability and cancellation
 
-When an estimate is used, its payload is identical to the launch payload. A stable idempotency key is
+A stable idempotency key is
 derived from the GitHub workflow run and job, selected workflow, and canonical
 launch body, so transient timeouts, action process restarts, and GitHub rerun
-attempts first recover the same launch. A recovered queued or running run is
+attempts first recover the same launch while the server retains the idempotency
+record. Guardian refreshes the canonical run on a GitHub rerun, since replayed
+launch responses can still contain their original queued status. A recovered queued or running run is
 polled, and a recovered successful run is reused, without a second launch. Only
 when a GitHub rerun finds that canonical run already `failed` or `cancelled`
 does Guardian launch one retry with a key scoped to that GitHub run attempt.
 That retry key is stable for restarts within the attempt. A new workflow run or
 changed launch input also produces a different key.
 
+Accepted, reservation-backed, and unresolved API launch records no longer
+expire merely with age. Recovery uses the same organization, API key, endpoint,
+idempotency key, and body; changing API keys or deleting the owning organization
+does not preserve that scope. Only definite pre-dispatch `4xx` failures without
+a run or reservation can expire after 24 hours. Records removed before this
+retention fix cannot be restored automatically. A recovered run needs no new
+estimate or balance reservation; new launches still enforce all server checks.
+
+`timeout` is a shared budget for API launch/recovery, polling, and result/file
+delivery. Retriable launches keep the same key until that deadline, including
+when a request times out before the server finishes. `Retry-After` is respected
+even for long quota resets; if the wait cannot fit, Guardian stops with recovery
+guidance instead of retrying early. Cancellation gets up to 15 seconds of grace;
+a run that succeeds during cancellation gets a bounded 15-second completion
+grace to fetch its report and deliver files. Neither grace can launch an audit.
+
 Guardian polls `GET /v2/runs/{run_id}`. Progress is displayed from the run's
 embedded `progress` object. On timeout or five consecutive polling failures it
 requests cancellation when the server marks the run cancellable. Canonical
 statuses are `queued`, `running`, `finalizing`, `succeeded`, `failed`,
 `cancelling`, and `cancelled`. A succeeded run guarantees that its result is
-ready and billing is settled.
+ready and billing is settled. A quota reset beyond the remaining budget stops
+polling without issuing an early cancellation request; the run ID remains
+available for recovery.
+
+PR summaries are scoped to workflow, model mode, immutable PR head, and canonical
+audit run. Guardian updates only comments that GitHub confirms were authored by
+the authenticated token identity. It skips publication for an outdated head,
+and a late older audit cannot overwrite a newer audit's summary. Legacy unscoped
+comments are left intact; the first run after upgrading creates a scoped summary.
 
 For AutoProver and AutoFuzzer, estimate and launch resolve the exact remote
 commit and `contract-path` before issuing a quote or reserving balance. An

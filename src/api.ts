@@ -30,8 +30,10 @@ export class AutoProverApiError extends Error {
 }
 
 export class AutoProverApiDeadlineError extends Error {
-  constructor() {
-    super("The configured run timeout expired during an AutoProver API request.");
+  constructor(
+    detail = "The configured run timeout expired during a Certora API request.",
+  ) {
+    super(detail);
     this.name = "AutoProverApiDeadlineError";
   }
 }
@@ -58,7 +60,16 @@ export function getAutoProverApiErrorMessage(
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  // Keep even unusually long server-directed waits inside Node's timer range.
+  const until = Date.now() + ms;
+  return new Promise((resolve) => {
+    const tick = () => {
+      const remaining = until - Date.now();
+      if (remaining <= 0) resolve();
+      else setTimeout(tick, Math.min(remaining, 30_000));
+    };
+    tick();
+  });
 }
 
 function canonicalJson(value: unknown): string {
@@ -315,6 +326,7 @@ function decodeResult(value: unknown): RunResultResponse {
     !isRecord(result) ||
     result.schema_version !== "1" ||
     typeof result.run_id !== "string" ||
+    !UUID_REGEX.test(result.run_id) ||
     typeof result.run_type !== "string" ||
     !RUN_TYPES.has(result.run_type) ||
     !isRecord(result.data)
@@ -400,14 +412,17 @@ async function request<T>(
   options: RequestInit = {},
   retries = MAX_RETRY_ATTEMPTS,
   deadlineMs?: number,
+  retryUntilDeadline = false,
 ): Promise<T> {
   let lastError: Error | null = null;
+  // Direct transport consumers also get a finite budget. Guardian supplies one
+  // shared deadline for launch, recovery, polling, result, and file delivery.
+  const deadline =
+    deadlineMs ??
+    Date.now() + API_REQUEST_TIMEOUT_MS * (retries + 1) + 30_000 * retries;
 
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const remainingMs =
-      deadlineMs === undefined
-        ? API_REQUEST_TIMEOUT_MS
-        : deadlineMs - Date.now();
+  for (let attempt = 0; ; attempt++) {
+    const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw new AutoProverApiDeadlineError();
 
     const controller = new AbortController();
@@ -474,7 +489,7 @@ async function request<T>(
     } catch (error) {
       if (error instanceof AutoProverApiError && !error.retryable) throw error;
       if (error instanceof Error && error.name === "AbortError") {
-        if (deadlineMs !== undefined && deadlineMs <= Date.now()) {
+        if (deadline <= Date.now()) {
           throw new AutoProverApiDeadlineError();
         }
         lastError = new Error("Certora API request timed out.");
@@ -486,23 +501,34 @@ async function request<T>(
       clearTimeout(timeout);
     }
 
-    if (attempt < retries) {
-      const remainingBeforeRetry =
-        deadlineMs === undefined
-          ? Number.POSITIVE_INFINITY
-          : deadlineMs - Date.now();
-      if (remainingBeforeRetry <= 0)
-        throw new AutoProverApiDeadlineError();
-      const delay = Math.min(
-        serverRetryAfterMs ?? 1000 * 2 ** attempt,
-        30_000,
-        remainingBeforeRetry,
+    // A server-directed wait must not be discarded at the retry-count limit:
+    // an outer status poll could otherwise retry before the quota resets.
+    if (
+      retryUntilDeadline ||
+      attempt < retries ||
+      serverRetryAfterMs !== null
+    ) {
+      const remainingBeforeRetry = deadline - Date.now();
+      if (remainingBeforeRetry <= 0) throw new AutoProverApiDeadlineError();
+      // Retry-After is a lower bound, not a suggestion to cap at 30 seconds.
+      // Stop with useful guidance if it cannot fit; never retry prematurely.
+      const delay = Math.max(
+        1_000,
+        serverRetryAfterMs ??
+          Math.min(1000 * 2 ** Math.min(attempt, 5), 30_000),
       );
+      if (delay >= remainingBeforeRetry) {
+        throw new AutoProverApiDeadlineError(
+          serverRetryAfterMs === null
+            ? undefined
+            : `The server requires a retry after ${Math.ceil(delay / 1000)} seconds, beyond the remaining run timeout. Rerun this GitHub workflow later with the same inputs and API key to recover the launch.`,
+        );
+      }
       core.info(
-        `Request failed, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${retries})...`,
+        `Request failed, retrying in ${delay / 1000}s (retry ${attempt + 1}${retryUntilDeadline || attempt >= retries ? " within run timeout" : `/${retries}`})...`,
       );
       await sleep(delay);
-    }
+    } else break;
   }
 
   throw lastError ?? new Error("Request failed after all retries");
@@ -512,6 +538,7 @@ export class AutoProverApi {
   constructor(
     private baseUrl: string,
     private apiKey: string,
+    private deadlineMs?: number,
   ) {}
 
   async estimateRun(
@@ -523,6 +550,8 @@ export class AutoProverApi {
         `${this.baseUrl}${workflowCollection(workflow)}/estimate`,
         this.apiKey,
         { method: "POST", body: JSON.stringify(body) },
+        MAX_RETRY_ATTEMPTS,
+        this.deadlineMs,
       ),
     );
   }
@@ -547,6 +576,11 @@ export class AutoProverApi {
               : {}),
           },
         },
+        MAX_RETRY_ATTEMPTS,
+        this.deadlineMs,
+        // The stable key makes retries safe even after an ambiguous timeout.
+        // Do not abandon a slow accepted launch after just three pending polls.
+        this.deadlineMs !== undefined,
       ),
     );
   }
@@ -558,7 +592,7 @@ export class AutoProverApi {
         this.apiKey,
         {},
         MAX_RETRY_ATTEMPTS,
-        deadlineMs,
+        deadlineMs ?? this.deadlineMs,
       ),
     );
   }
@@ -573,7 +607,7 @@ export class AutoProverApi {
         this.apiKey,
         {},
         MAX_RETRY_ATTEMPTS,
-        deadlineMs,
+        deadlineMs ?? this.deadlineMs,
       ),
     );
   }
@@ -585,7 +619,7 @@ export class AutoProverApi {
         this.apiKey,
         { method: "POST" },
         MAX_RETRY_ATTEMPTS,
-        deadlineMs,
+        deadlineMs ?? this.deadlineMs,
       ),
     );
   }
@@ -599,6 +633,7 @@ export class AutoProverApi {
         this.apiKey,
         { method: "POST" },
         MAX_RETRY_ATTEMPTS,
+        this.deadlineMs,
       ),
     );
   }

@@ -8,7 +8,7 @@ export declare class AutoProverApiError extends Error {
     constructor(code: string, message: string, statusCode: number, retryable: boolean, requestId?: string | undefined, fieldErrors?: Record<string, string[]> | undefined);
 }
 export declare class AutoProverApiDeadlineError extends Error {
-    constructor();
+    constructor(detail?: string);
 }
 export declare function getAutoProverApiErrorMessage(error: AutoProverApiError): string;
 /** Stable across action retries and process restarts for an identical launch. */
@@ -16,7 +16,8 @@ export declare function createIdempotencyKey(workflow: Workflow, body: RunReques
 export declare class AutoProverApi {
     private baseUrl;
     private apiKey;
-    constructor(baseUrl: string, apiKey: string);
+    private deadlineMs?;
+    constructor(baseUrl: string, apiKey: string, deadlineMs?: number | undefined);
     estimateRun(workflow: Workflow, body: RunRequest): Promise<EstimateResponse>;
     createRun(workflow: Workflow, body: RunRequest, idempotencyKey: string, estimateQuoteId?: string): Promise<RunResponse>;
     getRun(runId: string, deadlineMs?: number): Promise<RunResponse>;

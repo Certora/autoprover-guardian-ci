@@ -1,25 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { inputs, githubContext, info, setFailed, setOutput } = vi.hoisted(() => ({
-  inputs: new Map<string, string>(),
-  githubContext: {
-    payload: {
-      repository: { private: false },
-      pull_request: {
-        base: { sha: "a".repeat(40) },
-        head: { sha: "b".repeat(40) },
-        number: 42,
+const { inputs, githubContext, info, setFailed, setOutput } = vi.hoisted(
+  () => ({
+    inputs: new Map<string, string>(),
+    githubContext: {
+      payload: {
+        repository: { private: false },
+        pull_request: {
+          base: { sha: "a".repeat(40) },
+          head: { sha: "b".repeat(40) },
+          number: 42,
+        },
       },
+      repo: { owner: "example", repo: "mixed-language-app" },
+      runId: 123,
+      runAttempt: 1,
+      job: "security",
     },
-    repo: { owner: "example", repo: "mixed-language-app" },
-    runId: 123,
-    runAttempt: 1,
-    job: "security",
-  },
-  info: vi.fn(),
-  setFailed: vi.fn(),
-  setOutput: vi.fn(),
-}));
+    info: vi.fn(),
+    setFailed: vi.fn(),
+    setOutput: vi.fn(),
+  }),
+);
 
 vi.mock("@actions/core", () => ({
   getInput: (name: string, options?: { required?: boolean }) => {
@@ -57,7 +59,6 @@ const API_URL = "https://certora.example.test";
 const REPOSITORY_URL = "https://github.com/example/mixed-language-app";
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 const RETRY_RUN_ID = "22222222-2222-4222-8222-222222222222";
-const QUOTE_ID = "33333333-3333-4333-8333-333333333333";
 const FINDING = "src/api.py trusts an unvalidated tenant identifier.";
 const SCOPE = ["src/api.py", "web/[tenant]/route.ts", "!src/tests/**"];
 const CONTEXT = [
@@ -92,26 +93,38 @@ function runResponse(
     run_type: workflowRunType(workflow),
     model_mode: "frontier",
     status,
-    source: workflow === "ai-auditor-diff"
-      ? {
-          repository_url: REPOSITORY_URL,
-          base_commit_sha: "a".repeat(40),
-          head_commit_sha: "b".repeat(40),
-        }
-      : { repository_url: REPOSITORY_URL, commit_sha: "b".repeat(40) },
+    source:
+      workflow === "ai-auditor-diff"
+        ? {
+            repository_url: REPOSITORY_URL,
+            base_commit_sha: "a".repeat(40),
+            head_commit_sha: "b".repeat(40),
+          }
+        : { repository_url: REPOSITORY_URL, commit_sha: "b".repeat(40) },
     client_reference: `certora-guardian:pr-42:${"b".repeat(40)}:${workflow}`,
-    progress: status === "running"
-      ? { phase: "_11_context_split", percent: null, completed_steps: 0, total_steps: null }
-      : null,
+    progress:
+      status === "running"
+        ? {
+            phase: "_11_context_split",
+            percent: null,
+            completed_steps: 0,
+            total_steps: null,
+          }
+        : null,
     result: { available: status === "succeeded" },
     billing: {
       status: status === "queued" ? "reserved" : "settled",
       reserved_usd: "42.1250",
       charged_usd: status === "succeeded" ? "7.7500" : null,
     },
-    failure: status === "failed"
-      ? { code: "context_selection_failed", detail: "Context selection failed", retryable: false }
-      : null,
+    failure:
+      status === "failed"
+        ? {
+            code: "context_selection_failed",
+            detail: "Context selection failed",
+            retryable: false,
+          }
+        : null,
     delivery: null,
     cancellable: status === "queued" || status === "running",
     created_at: "2026-09-09T00:00:00.000Z",
@@ -124,17 +137,18 @@ function runResponse(
 }
 
 function resultResponse(workflow: AuditorWorkflow, runId = RUN_ID): Response {
-  const content = workflow === "ai-auditor-finding-validation"
-    ? {
-        final_verdict: "INVALID",
-        final_severity: null,
-        consensus_method: "unanimous_invalid",
-        analysis_status: "completed",
-        claude_verdict: null,
-        gpt_verdict: null,
-        tiebreaker_verdict: null,
-      }
-    : { findings: { highs: [], mediums: [], lows: [], infos: [] } };
+  const content =
+    workflow === "ai-auditor-finding-validation"
+      ? {
+          final_verdict: "INVALID",
+          final_severity: null,
+          consensus_method: "unanimous_invalid",
+          analysis_status: "completed",
+          claude_verdict: null,
+          gpt_verdict: null,
+          tiebreaker_verdict: null,
+        }
+      : { findings: { highs: [], mediums: [], lows: [], infos: [] } };
   return json({
     request_id: "req-result",
     result: {
@@ -146,30 +160,24 @@ function resultResponse(workflow: AuditorWorkflow, runId = RUN_ID): Response {
   });
 }
 
-function estimateResponse(canLaunch = true): Response {
-  return json({
-    request_id: "req-estimate",
-    estimate: {
-      estimated_cost_usd: "8.0000",
-      minimum_balance_required_usd: "10.0000",
-      balance_usd: canLaunch ? "100.0000" : "1.0000",
-      can_launch: canLaunch,
-      estimate_quote_id: QUOTE_ID,
-    },
-  });
-}
-
 function expectedBody(workflow: AuditorWorkflow, context: string[] = []) {
   const source = {
     repository_url: REPOSITORY_URL,
     authentication: {
-      type: githubContext.payload.repository.private ? "organization_github_app" : "public",
+      type: githubContext.payload.repository.private
+        ? "organization_github_app"
+        : "public",
     },
   };
   return {
-    source: workflow === "ai-auditor-diff"
-      ? { ...source, base_commit_sha: "a".repeat(40), head_commit_sha: "b".repeat(40) }
-      : { ...source, commit_sha: "b".repeat(40) },
+    source:
+      workflow === "ai-auditor-diff"
+        ? {
+            ...source,
+            base_commit_sha: "a".repeat(40),
+            head_commit_sha: "b".repeat(40),
+          }
+        : { ...source, commit_sha: "b".repeat(40) },
     context,
     model_mode: "frontier",
     skip_submodules: inputs.get("skip-submodules") === "true",
@@ -177,7 +185,9 @@ function expectedBody(workflow: AuditorWorkflow, context: string[] = []) {
     ...(workflow === "ai-auditor-finding-validation"
       ? { finding: FINDING }
       : { instructions: "Check tenant isolation.", max_iterations: 8 }),
-    ...(workflow === "ai-auditor-full" ? { scope: SCOPE, use_memory: false } : {}),
+    ...(workflow === "ai-auditor-full"
+      ? { scope: SCOPE, use_memory: false }
+      : {}),
   };
 }
 
@@ -193,11 +203,15 @@ function assertAutomaticLaunch(workflow: AuditorWorkflow, count = 1): void {
     expect(JSON.parse(String(options?.body))).toEqual(expectedBody(workflow));
     const headers = new Headers(options?.headers);
     expect(headers.get("Authorization")).toBe("Bearer certora_hermetic_test");
-    expect(headers.get("Idempotency-Key")).toMatch(/^certora-guardian-[a-f0-9]{64}$/);
+    expect(headers.get("Idempotency-Key")).toMatch(
+      /^certora-guardian-[a-f0-9]{64}$/,
+    );
     expect(headers.has("Estimate-Quote-Id")).toBe(false);
     expect(JSON.stringify(options)).not.toContain("ghs_local_test_only");
   }
-  expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/estimate"))).toBe(false);
+  expect(
+    fetchMock.mock.calls.some(([url]) => String(url).endsWith("/estimate")),
+  ).toBe(false);
 }
 
 describe("automatic context through the real Guardian request pipeline", () => {
@@ -205,7 +219,9 @@ describe("automatic context through the real Guardian request pipeline", () => {
     vi.resetAllMocks();
     vi.useFakeTimers();
     vi.stubGlobal("fetch", fetchMock);
-    fetchMock.mockRejectedValue(new Error("Unexpected HTTP request in hermetic test"));
+    fetchMock.mockRejectedValue(
+      new Error("Unexpected HTTP request in hermetic test"),
+    );
     githubContext.runAttempt = 1;
     githubContext.payload.repository.private = false;
     inputs.clear();
@@ -223,7 +239,8 @@ describe("automatic context through the real Guardian request pipeline", () => {
       scope: SCOPE.join(", "),
       instructions: "Check tenant isolation.",
       finding: FINDING,
-    })) inputs.set(key, value);
+    }))
+      inputs.set(key, value);
   });
 
   afterEach(() => {
@@ -235,108 +252,162 @@ describe("automatic context through the real Guardian request pipeline", () => {
   describe.each(WORKFLOWS)("%s", (workflow) => {
     beforeEach(() => inputs.set("workflow", workflow));
 
-    it.each([false, true])("polls server-selected context without local file inference (private=%s)", async (isPrivate) => {
-      githubContext.payload.repository.private = isPrivate;
-      inputs.set("skip-submodules", String(isPrivate));
-      fetchMock
-        .mockResolvedValueOnce(runResponse(workflow, "queued"))
-        .mockResolvedValueOnce(runResponse(workflow, "running"))
-        .mockResolvedValueOnce(runResponse(workflow))
-        .mockResolvedValueOnce(resultResponse(workflow));
+    it.each([false, true])(
+      "polls server-selected context without local file inference (private=%s)",
+      async (isPrivate) => {
+        githubContext.payload.repository.private = isPrivate;
+        inputs.set("skip-submodules", String(isPrivate));
+        fetchMock
+          .mockResolvedValueOnce(runResponse(workflow, "queued"))
+          .mockResolvedValueOnce(runResponse(workflow, "running"))
+          .mockResolvedValueOnce(runResponse(workflow))
+          .mockResolvedValueOnce(resultResponse(workflow));
 
-      const pending = run();
-      await vi.advanceTimersByTimeAsync(2_000);
-      await pending;
+        const pending = run();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await pending;
 
-      assertAutomaticLaunch(workflow);
-      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
-        collection(workflow),
-        `${API_URL}/v2/runs/${RUN_ID}`,
-        `${API_URL}/v2/runs/${RUN_ID}`,
-        `${API_URL}/v2/runs/${RUN_ID}/result`,
-      ]);
-      expect(info).toHaveBeenCalledWith("Reserved balance: $42.1250.");
-      expect(info).toHaveBeenCalledWith("Status: running | Phase: _11_context_split");
-      expect(setOutput).toHaveBeenCalledWith("status", "succeeded");
-      expect(setFailed).not.toHaveBeenCalled();
-    });
+        assertAutomaticLaunch(workflow);
+        expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+          collection(workflow),
+          `${API_URL}/v2/runs/${RUN_ID}`,
+          `${API_URL}/v2/runs/${RUN_ID}`,
+          `${API_URL}/v2/runs/${RUN_ID}/result`,
+        ]);
+        expect(info).toHaveBeenCalledWith("Reserved balance: $42.1250.");
+        expect(info).toHaveBeenCalledWith(
+          "Status: running | Phase: _11_context_split",
+        );
+        expect(setOutput).toHaveBeenCalledWith("status", "succeeded");
+        expect(setFailed).not.toHaveBeenCalled();
+      },
+    );
 
-    it.each(["", "  \n ", ", ,,"])("sends blank input %j as an empty array, not an inferred scope", async (context) => {
-      inputs.set("context", context);
-      fetchMock
-        .mockResolvedValueOnce(runResponse(workflow))
-        .mockResolvedValueOnce(resultResponse(workflow));
+    it.each(["", "  \n ", ", ,,"])(
+      "sends blank input %j as an empty array, not an inferred scope",
+      async (context) => {
+        inputs.set("context", context);
+        fetchMock
+          .mockResolvedValueOnce(runResponse(workflow))
+          .mockResolvedValueOnce(resultResponse(workflow));
 
-      await run();
+        await run();
 
-      assertAutomaticLaunch(workflow);
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-    });
+        assertAutomaticLaunch(workflow);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      },
+    );
 
-    it.each(["network", "503"])("retries a %s launch failure with identical bytes and idempotency key", async (failure) => {
-      if (failure === "network") {
-        fetchMock.mockRejectedValueOnce(new TypeError("Connection closed after submitting request"));
-      } else {
-        fetchMock.mockResolvedValueOnce(json({
-          code: "temporarily_unavailable", detail: "Please retry", status: 503, retryable: true,
-        }, 503));
-      }
-      fetchMock
-        .mockResolvedValueOnce(runResponse(workflow))
-        .mockResolvedValueOnce(resultResponse(workflow));
+    it.each(["network", "503"])(
+      "retries a %s launch failure with identical bytes and idempotency key",
+      async (failure) => {
+        if (failure === "network") {
+          fetchMock.mockRejectedValueOnce(
+            new TypeError("Connection closed after submitting request"),
+          );
+        } else {
+          fetchMock.mockResolvedValueOnce(
+            json(
+              {
+                code: "temporarily_unavailable",
+                detail: "Please retry",
+                status: 503,
+                retryable: true,
+              },
+              503,
+            ),
+          );
+        }
+        fetchMock
+          .mockResolvedValueOnce(runResponse(workflow))
+          .mockResolvedValueOnce(resultResponse(workflow));
 
-      const pending = run();
-      await vi.advanceTimersByTimeAsync(1_000);
-      await pending;
+        const pending = run();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await pending;
 
-      assertAutomaticLaunch(workflow, 2);
-      const [first, second] = launchCalls(workflow);
-      expect(second?.[1]?.body).toBe(first?.[1]?.body);
-      expect(second?.[1]?.headers).toEqual(first?.[1]?.headers);
-      expect(fetchMock).toHaveBeenCalledTimes(3);
-    });
+        assertAutomaticLaunch(workflow, 2);
+        const [first, second] = launchCalls(workflow);
+        expect(second?.[1]?.body).toBe(first?.[1]?.body);
+        expect(second?.[1]?.headers).toEqual(first?.[1]?.headers);
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+      },
+    );
 
     it.each([
       [402, "insufficient_balance"],
       [403, "source_access_denied"],
       [422, "invalid_context_scope"],
-    ] as const)("preserves nonretryable %i %s without preview or manual fallback", async (status, code) => {
-      fetchMock.mockResolvedValueOnce(json({
-        code, detail: "Launch refused before reservation", status,
-        retryable: false, request_id: "req-rejected",
-      }, status));
+    ] as const)(
+      "preserves nonretryable %i %s without preview or manual fallback",
+      async (status, code) => {
+        fetchMock.mockResolvedValueOnce(
+          json(
+            {
+              code,
+              detail: "Launch refused before reservation",
+              status,
+              retryable: false,
+              request_id: "req-rejected",
+            },
+            status,
+          ),
+        );
 
-      const error = await run().catch((reason: unknown) => reason);
+        const error = await run().catch((reason: unknown) => reason);
 
-      expect(error).toBeInstanceOf(AutoProverApiError);
-      expect(error).toMatchObject({ code, statusCode: status, retryable: false, requestId: "req-rejected" });
-      assertAutomaticLaunch(workflow);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(setOutput).not.toHaveBeenCalledWith("run-id", RUN_ID);
-    });
+        expect(error).toBeInstanceOf(AutoProverApiError);
+        expect(error).toMatchObject({
+          code,
+          statusCode: status,
+          retryable: false,
+          requestId: "req-rejected",
+        });
+        assertAutomaticLaunch(workflow);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(setOutput).not.toHaveBeenCalledWith("run-id", RUN_ID);
+      },
+    );
 
-    it.each(["failed", "cancelled"] as const)("retries a recovered %s run once without changing its automatic request", async (status) => {
-      githubContext.runAttempt = 2;
-      fetchMock
-        .mockResolvedValueOnce(runResponse(workflow, status))
-        .mockResolvedValueOnce(runResponse(workflow, "succeeded", { id: RETRY_RUN_ID }))
-        .mockResolvedValueOnce(resultResponse(workflow, RETRY_RUN_ID));
+    it.each(["failed", "cancelled"] as const)(
+      "retries a recovered %s run once without changing its automatic request",
+      async (status) => {
+        githubContext.runAttempt = 2;
+        fetchMock
+          .mockResolvedValueOnce(runResponse(workflow, "queued"))
+          .mockResolvedValueOnce(runResponse(workflow, status))
+          .mockResolvedValueOnce(
+            runResponse(workflow, "succeeded", { id: RETRY_RUN_ID }),
+          )
+          .mockResolvedValueOnce(resultResponse(workflow, RETRY_RUN_ID));
 
-      await run();
+        await run();
 
-      assertAutomaticLaunch(workflow, 2);
-      const [first, second] = launchCalls(workflow);
-      expect(second?.[1]?.body).toBe(first?.[1]?.body);
-      const firstKey = new Headers(first?.[1]?.headers).get("Idempotency-Key");
-      const retryKey = new Headers(second?.[1]?.headers).get("Idempotency-Key");
-      expect(retryKey).not.toBe(firstKey);
-      expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(`${API_URL}/v2/runs/${RETRY_RUN_ID}/result`);
-      expect(setFailed).not.toHaveBeenCalled();
-    });
+        assertAutomaticLaunch(workflow, 2);
+        const [first, second] = launchCalls(workflow);
+        expect(second?.[1]?.body).toBe(first?.[1]?.body);
+        const firstKey = new Headers(first?.[1]?.headers).get(
+          "Idempotency-Key",
+        );
+        const retryKey = new Headers(second?.[1]?.headers).get(
+          "Idempotency-Key",
+        );
+        expect(retryKey).not.toBe(firstKey);
+        expect(fetchMock.mock.calls[1]?.[0]).toBe(
+          `${API_URL}/v2/runs/${RUN_ID}`,
+        );
+        expect(fetchMock.mock.calls[1]?.[1]?.method ?? "GET").toBe("GET");
+        expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
+          `${API_URL}/v2/runs/${RETRY_RUN_ID}/result`,
+        );
+        expect(setFailed).not.toHaveBeenCalled();
+      },
+    );
 
     it("does not relaunch a recovered active job when its context selection fails", async () => {
       githubContext.runAttempt = 2;
       fetchMock
+        .mockResolvedValueOnce(runResponse(workflow, "queued"))
         .mockResolvedValueOnce(runResponse(workflow, "running"))
         .mockResolvedValueOnce(runResponse(workflow, "failed"));
 
@@ -345,46 +416,71 @@ describe("automatic context through the real Guardian request pipeline", () => {
       await pending;
 
       assertAutomaticLaunch(workflow);
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-      expect(setFailed).toHaveBeenCalledWith("Certora run failed: Context selection failed");
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(setFailed).toHaveBeenCalledWith(
+        "Certora run failed: Context selection failed",
+      );
     });
 
-    it("preserves manual mixed-language patterns and quote binding byte-for-byte", async () => {
+    it("preserves manual mixed-language patterns without an estimate blocking recovery", async () => {
       inputs.set("context", CONTEXT.join(", "));
       fetchMock
-        .mockResolvedValueOnce(estimateResponse())
         .mockResolvedValueOnce(runResponse(workflow))
         .mockResolvedValueOnce(resultResponse(workflow));
 
       await run();
 
       expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
-        `${collection(workflow)}/estimate`, collection(workflow), `${API_URL}/v2/runs/${RUN_ID}/result`,
+        collection(workflow),
+        `${API_URL}/v2/runs/${RUN_ID}/result`,
       ]);
-      const estimateOptions = fetchMock.mock.calls[0]?.[1];
-      const launchOptions = fetchMock.mock.calls[1]?.[1];
-      expect(JSON.parse(String(launchOptions?.body))).toEqual(expectedBody(workflow, CONTEXT));
-      expect(launchOptions?.body).toBe(estimateOptions?.body);
-      expect(new Headers(launchOptions?.headers).get("Estimate-Quote-Id")).toBe(QUOTE_ID);
+      const launchOptions = fetchMock.mock.calls[0]?.[1];
+      expect(JSON.parse(String(launchOptions?.body))).toEqual(
+        expectedBody(workflow, CONTEXT),
+      );
+      expect(new Headers(launchOptions?.headers).has("Estimate-Quote-Id")).toBe(
+        false,
+      );
     });
 
-    it("still blocks a manual override before launch when its estimate exceeds balance", async () => {
+    it("preserves the server's insufficient-balance rejection for a new manual override", async () => {
       inputs.set("context", CONTEXT.join(","));
-      fetchMock.mockResolvedValueOnce(estimateResponse(false));
+      fetchMock.mockResolvedValueOnce(
+        json(
+          {
+            code: "insufficient_balance",
+            detail: "Insufficient balance",
+            status: 402,
+            retryable: false,
+          },
+          402,
+        ),
+      );
 
-      await expect(run()).rejects.toThrow("minimum required $10.0000");
+      await expect(run()).rejects.toMatchObject({
+        code: "insufficient_balance",
+        statusCode: 402,
+      });
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(fetchMock.mock.calls[0]?.[0]).toBe(`${collection(workflow)}/estimate`);
-      expect(launchCalls(workflow)).toHaveLength(0);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe(collection(workflow));
+      expect(launchCalls(workflow)).toHaveLength(1);
+      expect(setOutput).not.toHaveBeenCalledWith("run-id", RUN_ID);
     });
 
     it("rejects a returned run for another commit without polling or fallback", async () => {
-      fetchMock.mockResolvedValueOnce(runResponse(workflow, "queued", {
-        source: workflow === "ai-auditor-diff"
-          ? { repository_url: REPOSITORY_URL, base_commit_sha: "a".repeat(40), head_commit_sha: "c".repeat(40) }
-          : { repository_url: REPOSITORY_URL, commit_sha: "c".repeat(40) },
-      }));
+      fetchMock.mockResolvedValueOnce(
+        runResponse(workflow, "queued", {
+          source:
+            workflow === "ai-auditor-diff"
+              ? {
+                  repository_url: REPOSITORY_URL,
+                  base_commit_sha: "a".repeat(40),
+                  head_commit_sha: "c".repeat(40),
+                }
+              : { repository_url: REPOSITORY_URL, commit_sha: "c".repeat(40) },
+        }),
+      );
 
       await expect(run()).rejects.toThrow("different source");
 
@@ -404,10 +500,33 @@ describe("automatic context through the real Guardian request pipeline", () => {
 
       assertAutomaticLaunch(workflow);
       expect(fetchMock).toHaveBeenCalledTimes(2);
-      expect(fetchMock.mock.calls[1]?.[0]).toBe(`${API_URL}/v2/runs/${RUN_ID}/cancel`);
+      expect(fetchMock.mock.calls[1]?.[0]).toBe(
+        `${API_URL}/v2/runs/${RUN_ID}/cancel`,
+      );
       expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "POST" });
       expect(fetchMock.mock.calls[1]?.[1]?.body).toBeUndefined();
       expect(setFailed).toHaveBeenCalledWith("Certora run was cancelled.");
+    });
+
+    it("can still fetch a result when the audit wins cancellation at the overall deadline", async () => {
+      inputs.set("poll-interval", "60");
+      fetchMock
+        .mockResolvedValueOnce(runResponse(workflow, "running"))
+        .mockResolvedValueOnce(runResponse(workflow, "succeeded"))
+        .mockResolvedValueOnce(resultResponse(workflow));
+
+      const pending = run();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await pending;
+
+      assertAutomaticLaunch(workflow);
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+        collection(workflow),
+        `${API_URL}/v2/runs/${RUN_ID}/cancel`,
+        `${API_URL}/v2/runs/${RUN_ID}/result`,
+      ]);
+      expect(setOutput).toHaveBeenCalledWith("status", "succeeded");
+      expect(setFailed).not.toHaveBeenCalled();
     });
   });
 });

@@ -145,6 +145,9 @@ function truncateReport(value: string, limit = 45_000): string {
       high = midpoint - 1;
     }
   }
+  // Binary search indexes UTF-16 code units. A byte boundary can fall between
+  // the two units of an emoji; keep the truncated Markdown valid Unicode.
+  if (low > 0 && /[\uD800-\uDBFF]/.test(value[low - 1] ?? "")) low -= 1;
   return `${value.slice(0, low)}${suffix}`;
 }
 

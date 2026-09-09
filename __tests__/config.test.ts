@@ -96,6 +96,99 @@ describe("getConfig v2", () => {
     });
   });
 
+  describe.each(["context", "scope"])("%s pattern input", (field) => {
+    beforeEach(() => {
+      inputs.set("workflow", "ai-auditor-full");
+    });
+
+    it("round-trips structured paths and globs without comma splitting", () => {
+      const patterns = [
+        "contracts/Exchange,old.sol",
+        "src/**/*.{ts,tsx}",
+        "lib/{one,{two,three}}/**/*.rs",
+        "web/[tenant]/route.ts",
+        "[bracket]/file.py",
+        "src/file with spaces.py",
+        "!src/tests/**",
+        "src/@(first,second).ts",
+        'src/quote"name.py',
+      ];
+      inputs.set(field, JSON.stringify(patterns));
+
+      expect(getConfig()).toHaveProperty(field, patterns);
+    });
+
+    it("accepts a multiline JSON array and normalizes whitespace like the API", () => {
+      inputs.set(field, '[\n  " src/a,b.ts ",\n  "!src/tests/**"\n]');
+
+      expect(getConfig()).toHaveProperty(field, ["src/a,b.ts", "!src/tests/**"]);
+    });
+
+    it("preserves legacy comma-separated patterns including nested glob groups", () => {
+      inputs.set(field, " src/*.{ts,tsx},lib/{one,{two,three}}/**,[a,b]/**,src/@(a,b).ts,!src/tests/** ");
+
+      expect(getConfig()).toHaveProperty(field, [
+        "src/*.{ts,tsx}", "lib/{one,{two,three}}/**", "[a,b]/**", "src/@(a,b).ts", "!src/tests/**",
+      ]);
+    });
+
+    it.each(["[tenant]/route.ts", "[a-z]/**/*.py", "[!x]/**"])(
+      "does not confuse a leading bracket path %s with JSON",
+      (pattern) => {
+        inputs.set(field, pattern);
+        expect(getConfig()).toHaveProperty(field, [pattern]);
+      },
+    );
+
+    it("preserves escaped glob commas without treating them as list separators", () => {
+      inputs.set(field, String.raw`src/a\,b.ts,src/other.ts`);
+      expect(getConfig()).toHaveProperty(field, [String.raw`src/a\,b.ts`, "src/other.ts"]);
+    });
+
+    it.each(['["src/file.ts",]', '["src/file.ts"', "["])(
+      "rejects malformed intended JSON %s",
+      (value) => {
+        inputs.set(field, value);
+        expect(() => getConfig()).toThrow(`${field} must be a valid JSON array`);
+      },
+    );
+
+    it.each(['[42]', '[null]', '[true]', '[{}]', '[["src/**"]]', '[""]', '["  "]'])(
+      "rejects JSON values other than non-empty pattern strings: %s",
+      (value) => {
+        inputs.set(field, value);
+        expect(() => getConfig()).toThrow("JSON array of non-empty pattern strings");
+      },
+    );
+
+    it.each([
+      [["x".repeat(501)], "500 characters"],
+      [["src/\u0000file.ts"], "null bytes"],
+      [Array.from({ length: 5_001 }, () => "src/**"), "5000 patterns"],
+    ] as const)("enforces API limits for structured patterns", (patterns, error) => {
+      inputs.set(field, JSON.stringify(patterns));
+      expect(() => getConfig()).toThrow(error);
+    });
+
+    it("accepts the API array and pattern-length boundaries", () => {
+      const patterns = Array.from({ length: 5_000 }, () => "a".repeat(500));
+      inputs.set(field, JSON.stringify(patterns));
+      expect(getConfig()).toHaveProperty(field, patterns);
+    });
+  });
+
+  it("treats an empty JSON context array as automatic selection", () => {
+    inputs.set("context", "[]");
+    expect(getConfig()).toHaveProperty("context", []);
+  });
+
+  it("requires full automatic scope when the scope JSON array is empty", () => {
+    inputs.set("workflow", "ai-auditor-full");
+    inputs.set("context", "[]");
+    inputs.set("scope", "[]");
+    expect(() => getConfig()).toThrow("scope is required for full audits");
+  });
+
   it("leaves an omitted model mode unset for legacy launch-body compatibility", () => {
     expect(getConfig()).toMatchObject({ maxIterations: 6 });
     expect(getConfig()).toHaveProperty("modelMode", undefined);
