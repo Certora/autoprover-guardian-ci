@@ -8,12 +8,13 @@ AutoProver Guardian CI runs one Certora workflow for every pull request:
 - `auto-prover`
 - `auto-fuzzer`
 
-The action uses the public `/v2` run API. It estimates each run before launch,
-submits launches with a deterministic `Idempotency-Key`, forwards the optional
-AISS `Estimate-Quote-Id`, and polls the canonical run resource until it
-succeeds, fails, or is cancelled. Quote forwarding is automatic and requires no
-workflow input; AI Auditor estimates do not return a quote. There is no
-separate progress endpoint.
+The action uses the public `/v2` run API. Automatic-context AI Auditor runs are
+submitted in one launch request, without a separate estimate or preview.
+Explicit-context AI Auditor, AutoProver, and AutoFuzzer runs are estimated first.
+Launches use a deterministic `Idempotency-Key`; the optional AISS
+`Estimate-Quote-Id` is forwarded automatically without a workflow input.
+Guardian polls the canonical run resource until it succeeds, fails, or is
+cancelled. There is no separate progress endpoint.
 
 ## Quick start
 
@@ -22,13 +23,20 @@ dashboard, then save it as a repository secret named `CERTORA_API_KEY`.
 Guardian needs `runs:create` and `runs:read`; grant `runs:cancel` for timeout
 cancellation and `generated_files:write` for AutoProver or AutoFuzzer delivery.
 
-Guardian CI intentionally requires an explicit `context` input for every AI
-Auditor workflow, matching the public REST API. Select globs that include the
-audited code and relevant dependencies; automatic preview preparation is
-dashboard-only. AutoProver and AutoFuzzer do not
-use this input. GitHub action metadata cannot make an input conditionally
-required, so `action.yml` marks it optional and Guardian enforces the AI Auditor
-requirement at runtime.
+Omit `context` or leave it empty to let the server select context during launch.
+No preview or preparation token is required. Full audits require `scope` when
+context is automatic; diff audits use the complete immutable pull-request diff
+as their audit scope. Finding validation selects context for the submitted
+finding. Guardian never replaces empty context with every repository file or
+a locally generated list of changed files. The server checks balance and
+reserves the required amount before starting the audit.
+
+An explicit `context` remains an override: select comma-separated globs that
+include the audited code and relevant dependencies. For full audits, an optional
+`scope` focuses on a subset of that context; without it, the explicit context
+is the scope. For diff audits, explicit context also filters the diff, so keep
+the changed paths you want audited in that selection. AutoProver and AutoFuzzer
+do not use this input.
 
 AI Auditor loads direct submodules only, never nested submodules. Set
 `skip-submodules: true` to skip all submodules. Include required libraries in
@@ -54,7 +62,6 @@ jobs:
         with:
           api-key: ${{ secrets.CERTORA_API_KEY }}
           workflow: ai-auditor-diff
-          context: "contracts/**/*.sol"
 ```
 
 The API key is sent as a Bearer token only to the configured Certora API base
@@ -75,7 +82,7 @@ run succeeds. Fork pull requests are rejected for these two workflows.
 ## Workflow examples
 
 AI Auditor supports any programming language for full, diff, and finding-validation
-runs. Context may mix source languages, shared libraries, resources, and relevant
+runs. Explicit context may mix source languages, shared libraries, resources, and relevant
 build manifests (for example `src/**/*.py,web/**/*.ts,lib/**,pyproject.toml`).
 Only AutoProver and AutoFuzzer require Solidity contracts.
 
@@ -90,7 +97,7 @@ Finding validation supports both model modes but has no DeepDive iterations.
 
 Leave `model-mode` empty to use Normal without changing existing launch bodies
 or idempotency keys. An explicit selection is forwarded as `model_mode` in
-both estimate and launch, so the cost estimate uses that same mode. Guardian
+launch and any estimate, so both use that same mode. Guardian
 never retries by removing or downgrading the requested mode. AutoProver and
 AutoFuzzer reject this AI Auditor-only input.
 
@@ -105,7 +112,6 @@ Normal and Frontier jobs for the same workflow can coexist in a matrix.
   with:
     api-key: ${{ secrets.CERTORA_API_KEY }}
     workflow: ai-auditor-diff
-    context: "contracts/**/*.sol"
     model-mode: frontier
     max-iterations: "6"
 ```
@@ -117,7 +123,6 @@ Normal and Frontier jobs for the same workflow can coexist in a matrix.
   with:
     api-key: ${{ secrets.CERTORA_API_KEY }}
     workflow: ai-auditor-full
-    context: "contracts/**/*.sol,docs/**/*.md"
     scope: "contracts/src/**/*.sol"
     instructions: "Focus on authorization and accounting invariants."
     use-memory: "true"
@@ -130,7 +135,6 @@ Normal and Frontier jobs for the same workflow can coexist in a matrix.
   with:
     api-key: ${{ secrets.CERTORA_API_KEY }}
     workflow: ai-auditor-diff
-    context: "contracts/**/*.sol"
     fail-on: "HIGH,MEDIUM"
 ```
 
@@ -141,7 +145,6 @@ Normal and Frontier jobs for the same workflow can coexist in a matrix.
   with:
     api-key: ${{ secrets.CERTORA_API_KEY }}
     workflow: ai-auditor-finding-validation
-    context: "contracts/**/*.sol"
     finding: "Vault.withdraw() may allow reentrancy before balances are updated."
 ```
 
@@ -150,6 +153,20 @@ the pull request and exposes `validation-verdict` (`VALID` or `INVALID`) and
 `validation-severity`. A `VALID` verdict means the submitted finding is valid;
 the action reports it but does not apply a built-in failure policy. Use the
 output in a later workflow step when repository policy should fail on it.
+
+### Explicit context override
+
+```yaml
+- uses: Certora/autoprover-guardian-ci@v2
+  with:
+    api-key: ${{ secrets.CERTORA_API_KEY }}
+    workflow: ai-auditor-full
+    scope: "src/**/*.py"
+    context: "src/**/*.py,lib/**/*.py"
+```
+
+This override is sent unchanged and estimated before launch; it does not invoke
+automatic context selection.
 
 ### AutoProver
 
@@ -200,7 +217,7 @@ expected.
 
 ## Reliability and cancellation
 
-The estimate and launch payloads are identical. A stable idempotency key is
+When an estimate is used, its payload is identical to the launch payload. A stable idempotency key is
 derived from the GitHub workflow run and job, selected workflow, and canonical
 launch body, so transient timeouts, action process restarts, and GitHub rerun
 attempts first recover the same launch. A recovered queued or running run is
@@ -230,9 +247,9 @@ errors, so correcting the repository access or path and rerunning is safe.
 | `api-key`           | Yes                | —                         | Certora organization API key                           |
 | `workflow`          | No                 | `ai-auditor-diff`         | One of the five workflows listed above                 |
 | `model-mode`        | No                 | Empty (Normal)           | AI Auditor model set: `normal` or `frontier`             |
-| `context`           | AI Auditor         | —                         | Explicit repository globs; automatic selection is off  |
+| `context`           | No                 | Empty (automatic)         | Optional AI Auditor context override; server selects context when empty |
 | `finding`           | Finding validation | —                         | Finding description to validate, up to 8000 characters |
-| `scope`             | No                 | —                         | Full-run focus paths, within `context`                 |
+| `scope`             | Full auto context  | —                         | Full-run audit paths; optional subset with explicit context |
 | `instructions`      | No                 | —                         | Custom AI Auditor instructions, up to 10,000 chars     |
 | `use-memory`        | No                 | `true`                    | Use repository memory for full runs                    |
 | `max-iterations`    | No                 | `6`                       | AI Auditor iterations, from 4 through 10               |
@@ -277,7 +294,6 @@ errors, so correcting the repository access or path and rerunning is safe.
   with:
     api-key: ${{ secrets.CERTORA_API_KEY }}
     workflow: ai-auditor-diff
-    context: "contracts/**/*.sol"
     api-base-url: "https://your-certora-deployment.example.com"
 ```
 

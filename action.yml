@@ -22,8 +22,9 @@ inputs:
     default: ""
 
   context:
-    description: "Required for every AI Auditor workflow: explicit comma-separated glob patterns for files to analyze (maximum 500 characters each)"
+    description: "AI Auditor only: optional comma-separated context override (maximum 500 characters per pattern). Empty selects context on the server during launch; no preview required."
     required: false
+    default: ""
 
   finding:
     description: "Finding validation only: finding description to validate (maximum 8000 characters)"
@@ -40,7 +41,7 @@ inputs:
     default: "https://app.certora.com"
 
   scope:
-    description: "AI Auditor only: comma-separated scope patterns for full audits (subset of context to focus on)."
+    description: "Full AI Auditor only: comma-separated audit scope patterns; required when context is empty. With explicit context, scope is an optional subset to focus on. Diff audits use the immutable diff as scope."
     required: false
 
   instructions:

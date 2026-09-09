@@ -355,6 +355,60 @@ describe("run v2 orchestration", () => {
     apiMethods.commitGeneratedFiles.mockResolvedValue(commit);
   });
 
+  describe.each(["normal", "frontier"] as const)("automatic context in %s mode", (modelMode) => {
+    it.each(["ai-auditor-full", "ai-auditor-diff", "ai-auditor-finding-validation"] as const)(
+      "launches %s directly without locally selecting files or requiring a preview",
+      async (workflow) => {
+        const base = workflow === "ai-auditor-finding-validation"
+          ? findingValidationConfig()
+          : aiConfig(workflow);
+        const config = { ...base, context: [], modelMode, repositoryPrivate: true, skipSubmodules: true };
+        getConfigMock.mockReturnValue(config);
+        apiMethods.createRun.mockResolvedValue({
+          request_id: "req-auto", run: { ...runResource(workflow), model_mode: modelMode },
+        });
+        apiMethods.getResult.mockResolvedValue(workflow === "ai-auditor-finding-validation"
+          ? findingValidationResult() : aiResult(workflow));
+
+        await run();
+
+        const body = buildRunRequest(config);
+        expect(body).toMatchObject({
+          context: [], model_mode: modelMode, skip_submodules: true,
+          source: { authentication: { type: "organization_github_app" } },
+        });
+        expect(JSON.stringify(body)).not.toContain(config.githubToken);
+        expect(apiMethods.estimateRun).not.toHaveBeenCalled();
+        expect(apiMethods.createRun).toHaveBeenCalledExactlyOnceWith(
+          workflow, body, "certora-guardian-stable", undefined,
+        );
+        expect(createIdempotencyKeyMock).toHaveBeenCalledWith(workflow, body, config.idempotencySeed);
+        expect(infoMock).toHaveBeenCalledWith("Reserved balance: $10.0000.");
+        if (workflow === "ai-auditor-full") {
+          expect(body).toHaveProperty("scope", ["contracts/src/**"]);
+        } else if (workflow === "ai-auditor-diff") {
+          expect(body).not.toHaveProperty("scope");
+          expect(body).toMatchObject({ source: { base_commit_sha: "a".repeat(40), head_commit_sha: HEAD_SHA } });
+        } else {
+          expect(body).toHaveProperty("finding", "Vault.withdraw() may be reentrant.");
+          expect(body).not.toHaveProperty("max_iterations");
+        }
+      },
+    );
+  });
+
+  it("preserves the server's insufficient-balance failure for automatic context", async () => {
+    getConfigMock.mockReturnValue({ ...aiConfig(), context: [] });
+    apiMethods.createRun.mockRejectedValueOnce(new Error("insufficient_balance"));
+
+    await expect(run()).rejects.toThrow("insufficient_balance");
+
+    expect(apiMethods.estimateRun).not.toHaveBeenCalled();
+    expect(apiMethods.createRun).toHaveBeenCalledTimes(1);
+    expect(apiMethods.getRun).not.toHaveBeenCalled();
+    expect(apiMethods.getResult).not.toHaveBeenCalled();
+  });
+
   it.each(["ai-auditor-full", "ai-auditor-diff"] as const)(
     "preserves the legacy %s request when model-mode is omitted",
     (workflow) => {

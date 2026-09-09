@@ -940,15 +940,23 @@ export async function run(): Promise<void> {
   }
 
   const body = buildRunRequest(config);
-  core.info("Phase 2: Estimating run...");
-  const estimate = (await api.estimateRun(config.workflow, body)).estimate;
-  core.info(
-    `Estimated cost: $${estimate.estimated_cost_usd}; minimum required balance: $${estimate.minimum_balance_required_usd}; current balance: $${estimate.balance_usd}.`,
-  );
-  if (!estimate.can_launch) {
-    throw new Error(
-      `The run cannot launch: balance $${estimate.balance_usd}, minimum required $${estimate.minimum_balance_required_usd}.`,
+  let estimateQuoteId: string | undefined;
+  if (!isStandaloneConfig(config) && config.context.length === 0) {
+    core.info(
+      "Phase 2: Using server-selected context; no separate preview. The server checks balance and reserves the required amount during launch.",
     );
+  } else {
+    core.info("Phase 2: Estimating run...");
+    const estimate = (await api.estimateRun(config.workflow, body)).estimate;
+    core.info(
+      `Estimated cost: $${estimate.estimated_cost_usd}; minimum required balance: $${estimate.minimum_balance_required_usd}; current balance: $${estimate.balance_usd}.`,
+    );
+    if (!estimate.can_launch) {
+      throw new Error(
+        `The run cannot launch: balance $${estimate.balance_usd}, minimum required $${estimate.minimum_balance_required_usd}.`,
+      );
+    }
+    estimateQuoteId = estimate.estimate_quote_id;
   }
 
   core.info("Phase 3: Launching run...");
@@ -962,7 +970,7 @@ export async function run(): Promise<void> {
       config.workflow,
       body,
       idempotencyKey,
-      estimate.estimate_quote_id,
+      estimateQuoteId,
     )
   ).run;
   let currentRunId = currentRun.id;
@@ -979,6 +987,7 @@ export async function run(): Promise<void> {
       core.setOutput("model-mode", reportedModelMode(config, currentRun) ?? "");
     }
     core.info(`Run created or recovered: ${currentRunId}`);
+    core.info(`Reserved balance: $${currentRun.billing.reserved_usd}.`);
 
     core.info("Phase 4: Polling run...");
     const terminal = await pollRun(
@@ -1018,7 +1027,7 @@ export async function run(): Promise<void> {
           config.workflow,
           body,
           retryIdempotencyKey,
-          estimate.estimate_quote_id,
+          estimateQuoteId,
         )
       ).run;
       currentRunId = currentRun.id;

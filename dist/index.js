@@ -30707,9 +30707,6 @@ function getConfig() {
     }
     const contextInput = core.getInput("context");
     const context = parseApiPatternList(contextInput, "context");
-    if (context.length === 0) {
-        throw new Error("At least one context pattern is required.");
-    }
     const modelMode = parseModelMode(modelModeInput);
     if (workflow === "ai-auditor-finding-validation") {
         const finding = core.getInput("finding").trim();
@@ -30739,6 +30736,9 @@ function getConfig() {
     }
     const scopeInput = core.getInput("scope") || "";
     const scope = parseApiPatternList(scopeInput, "scope");
+    if (workflow === "ai-auditor-full" && context.length === 0 && scope.length === 0) {
+        throw new Error("scope is required for full audits when context is selected automatically.");
+    }
     return {
         ...common,
         workflow,
@@ -32116,15 +32116,22 @@ async function run() {
             return;
     }
     const body = buildRunRequest(config);
-    core.info("Phase 2: Estimating run...");
-    const estimate = (await api.estimateRun(config.workflow, body)).estimate;
-    core.info(`Estimated cost: $${estimate.estimated_cost_usd}; minimum required balance: $${estimate.minimum_balance_required_usd}; current balance: $${estimate.balance_usd}.`);
-    if (!estimate.can_launch) {
-        throw new Error(`The run cannot launch: balance $${estimate.balance_usd}, minimum required $${estimate.minimum_balance_required_usd}.`);
+    let estimateQuoteId;
+    if (!isStandaloneConfig(config) && config.context.length === 0) {
+        core.info("Phase 2: Using server-selected context; no separate preview. The server checks balance and reserves the required amount during launch.");
+    }
+    else {
+        core.info("Phase 2: Estimating run...");
+        const estimate = (await api.estimateRun(config.workflow, body)).estimate;
+        core.info(`Estimated cost: $${estimate.estimated_cost_usd}; minimum required balance: $${estimate.minimum_balance_required_usd}; current balance: $${estimate.balance_usd}.`);
+        if (!estimate.can_launch) {
+            throw new Error(`The run cannot launch: balance $${estimate.balance_usd}, minimum required $${estimate.minimum_balance_required_usd}.`);
+        }
+        estimateQuoteId = estimate.estimate_quote_id;
     }
     core.info("Phase 3: Launching run...");
     const idempotencyKey = (0, api_1.createIdempotencyKey)(config.workflow, body, config.idempotencySeed);
-    let currentRun = (await api.createRun(config.workflow, body, idempotencyKey, estimate.estimate_quote_id)).run;
+    let currentRun = (await api.createRun(config.workflow, body, idempotencyKey, estimateQuoteId)).run;
     let currentRunId = currentRun.id;
     const canonicalRunWasTerminalAtRecovery = currentRun.status === "failed" || currentRun.status === "cancelled";
     let usedAttemptScopedRetry = false;
@@ -32137,6 +32144,7 @@ async function run() {
             core.setOutput("model-mode", reportedModelMode(config, currentRun) ?? "");
         }
         core.info(`Run created or recovered: ${currentRunId}`);
+        core.info(`Reserved balance: $${currentRun.billing.reserved_usd}.`);
         core.info("Phase 4: Polling run...");
         const terminal = await pollRun(api, currentRun, currentRunId, config, config.pollInterval, config.timeout);
         activeRun = null;
@@ -32155,7 +32163,7 @@ async function run() {
             usedAttemptScopedRetry = true;
             const retryIdempotencyKey = (0, api_1.createIdempotencyKey)(config.workflow, body, `${config.idempotencySeed}:github-rerun-attempt:${config.githubRunAttempt}`);
             core.info(`GitHub rerun attempt ${config.githubRunAttempt} recovered terminal ${currentRun.status} run ${currentRunId}; launching one attempt-scoped retry.`);
-            currentRun = (await api.createRun(config.workflow, body, retryIdempotencyKey, estimate.estimate_quote_id)).run;
+            currentRun = (await api.createRun(config.workflow, body, retryIdempotencyKey, estimateQuoteId)).run;
             currentRunId = currentRun.id;
             continue;
         }

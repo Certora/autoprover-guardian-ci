@@ -161,26 +161,36 @@ describe("getConfig v2", () => {
     "ai-auditor-diff",
     "ai-auditor-finding-validation",
   ])(
-    "requires context for %s",
+    "defaults to server-selected context for %s without expanding files locally",
     (workflow) => {
       inputs.set("workflow", workflow);
       inputs.delete("context");
-      expect(() => getConfig()).toThrow(
-        "At least one context pattern is required.",
-      );
+      inputs.set("scope", "src/main.py");
+      inputs.set("finding", "The route bypasses authorization.");
+      expect(getConfig()).toMatchObject({ workflow, context: [] });
     },
   );
 
   it.each(["", "   ", ", ,,"])(
-    "rejects blank context input %j",
+    "treats blank context input %j as automatic selection",
     (contextInput) => {
       inputs.set("workflow", "ai-auditor-diff");
       inputs.set("context", contextInput);
-      expect(() => getConfig()).toThrow(
-        "At least one context pattern is required.",
-      );
+      expect(getConfig()).toMatchObject({ context: [] });
     },
   );
+
+  it.each(["", "  ", ", ,"])("requires full auto audit scope for %j", (scope) => {
+    inputs.set("workflow", "ai-auditor-full");
+    inputs.delete("context");
+    inputs.set("scope", scope);
+    expect(() => getConfig()).toThrow("scope is required for full audits when context is selected automatically");
+  });
+
+  it("preserves explicit full context without requiring a separate scope", () => {
+    inputs.set("workflow", "ai-auditor-full");
+    expect(getConfig()).toMatchObject({ context: ["contracts/**/*.sol"], scope: undefined });
+  });
 
   it("parses AutoProver contract and document inputs", () => {
     inputs.set("workflow", "auto-prover");

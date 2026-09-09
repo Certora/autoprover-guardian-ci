@@ -340,9 +340,6 @@ export function getConfig(): ActionConfig {
   const contextInput = core.getInput("context");
   const context = parseApiPatternList(contextInput, "context");
 
-  if (context.length === 0) {
-    throw new Error("At least one context pattern is required.");
-  }
   const modelMode = parseModelMode(modelModeInput);
 
   if (workflow === "ai-auditor-finding-validation") {
@@ -383,6 +380,9 @@ export function getConfig(): ActionConfig {
 
   const scopeInput = core.getInput("scope") || "";
   const scope = parseApiPatternList(scopeInput, "scope");
+  if (workflow === "ai-auditor-full" && context.length === 0 && scope.length === 0) {
+    throw new Error("scope is required for full audits when context is selected automatically.");
+  }
 
   return {
     ...common,

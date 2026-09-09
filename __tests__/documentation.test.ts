@@ -58,26 +58,23 @@ describe("published v2 documentation", () => {
     expect(action).toContain('using: "node24"');
   });
 
-  it("documents Guardian's explicit AI Auditor context policy", () => {
+  it("documents server-selected context by default and explicit overrides", () => {
     const normalizedReadme = readme.replace(/\s+/g, " ");
     expect(normalizedReadme).toContain(
-      "Guardian CI intentionally requires an explicit `context` input for every AI Auditor workflow",
+      "Omit `context` or leave it empty to let the server select context during launch",
     );
-    expect(normalizedReadme).toContain("matching the public REST API");
+    expect(normalizedReadme).toContain("No preview or preparation token is required");
+    expect(normalizedReadme).toContain("Full audits require `scope` when context is automatic");
+    expect(normalizedReadme).toContain("explicit context also filters the diff");
+    expect(normalizedReadme).toContain("a locally generated list of changed files");
     expect(normalizedReadme).toContain(
       "loads direct submodules only, never nested submodules",
     );
-    expect(normalizedReadme).not.toContain(
-      "public REST API supports automatic context selection",
-    );
-    expect(normalizedReadme).toContain(
-      "GitHub action metadata cannot make an input conditionally required",
-    );
-    expect(action).toContain(
-      "Required for every AI Auditor workflow: explicit comma-separated glob patterns",
-    );
+    expect(normalizedReadme).not.toContain("requires an explicit `context`");
+    expect(action).toContain("Empty selects context on the server during launch");
     const contextInput = action.split("  context:")[1]?.split("\n\n")[0] ?? "";
     expect(contextInput).toContain("required: false");
+    expect(contextInput).toContain('default: ""');
   });
 
   it("states that GitHub credentials stay local", () => {
