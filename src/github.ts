@@ -24,10 +24,6 @@ type CommentOwnershipResponse = {
   } | null)[];
 };
 
-// Generated commits are immutable external state. Removing this protocol alias
-// can launch a duplicate paid run when an older generated commit is revisited.
-const LEGACY_GENERATED_RUN_TRAILER = "Zeus-Guardian-Job";
-
 function hasLeadingCommentMarker(
   body: string | null | undefined,
   marker: string,
@@ -57,15 +53,9 @@ function generatedRunIdFromCommitMessage(message: string): string | null {
   while (lines.at(-1) === "") lines.pop();
   const trailer = lines.at(-1);
   const match = trailer?.match(
-    /^([^:]+): ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/,
+    /^Certora-Guardian-Run: ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/,
   );
-  if (
-    match?.[1] !== "Certora-Guardian-Run" &&
-    match?.[1] !== LEGACY_GENERATED_RUN_TRAILER
-  ) {
-    return null;
-  }
-  return match[2] ?? null;
+  return match?.[1] ?? null;
 }
 
 export class GitHubClient {

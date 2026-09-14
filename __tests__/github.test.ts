@@ -174,17 +174,14 @@ describe("GitHubClient", () => {
     },
   );
 
-  it.each([
-    ["current", `Certora-Guardian-Run: ${RUN_ID}`],
-    ["legacy protocol", `Zeus-Guardian-Job: ${RUN_ID}`],
-  ])(
-    "returns the UUID from an exact final %s commit-message trailer",
-    async (_kind, trailer) => {
+  it.each(["\n", "\r\n"])(
+    "returns the UUID from the exact final commit-message trailer with %j line endings",
+    async (lineEnding) => {
       getCommitMock.mockResolvedValue({
         data: {
           sha: HEAD_SHA,
           commit: {
-            message: `Add AutoProver artifacts for Vault\r\n\r\n${trailer}\r\n`,
+            message: `Add AutoProver artifacts for Vault${lineEnding}${lineEnding}Certora-Guardian-Run: ${RUN_ID}${lineEnding}`,
           },
           parents: [{ sha: "a".repeat(40) }],
         },
@@ -674,6 +671,8 @@ describe("GitHubClient", () => {
     ` Certora-Guardian-Run: ${RUN_ID}`,
     `certora-guardian-run: ${RUN_ID}`,
     `Certora-Guardian-Run: ${RUN_ID} `,
+    `Zeus-Guardian-Job: ${RUN_ID}`,
+    `Add AutoProver artifacts for Vault\r\n\r\nZeus-Guardian-Job: ${RUN_ID}\r\n`,
     `Zeus-Guardian-Job: ${RUN_ID}\nadditional text`,
     `zeus-guardian-job: ${RUN_ID}`,
     `Zeus-Guardian-Job: ${RUN_ID} `,

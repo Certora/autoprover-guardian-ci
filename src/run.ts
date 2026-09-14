@@ -664,17 +664,36 @@ async function tryGeneratedFollowup(
     followup.runId,
     followup.sourceCommitSha,
   );
+  const delivery = response.run.delivery;
+  const completedForHead =
+    delivery?.status === "succeeded" &&
+    delivery.outcome === "committed" &&
+    delivery.commit_sha?.toLowerCase() === config.headCommitSha.toLowerCase();
+  // The GitHub push precedes the server's durable delivery completion. A
+  // follow-up can arrive while that write is pending, or after an ambiguous
+  // failure. Let the same run's replay-safe delivery endpoint reconcile the
+  // exact generated child (parent, files, hashes and modes) in those states.
+  // Contradictory completed delivery metadata must still fail closed.
+  const needsDeliveryRecovery =
+    (delivery?.status === "pending" || delivery?.status === "failed") &&
+    delivery.outcome === null &&
+    delivery.commit_sha === null;
   if (
     response.run.status !== "succeeded" ||
-    response.run.delivery?.status !== "succeeded" ||
-    response.run.delivery.outcome !== "committed" ||
-    response.run.delivery.commit_sha?.toLowerCase() !==
-      config.headCommitSha.toLowerCase()
+    (!completedForHead && !needsDeliveryRecovery)
   ) {
     throw new Error(
       "Generated follow-up references an incompatible Certora run.",
     );
   }
+  if (needsDeliveryRecovery) {
+    core.info(
+      `Recovering generated-file delivery for Certora run ${followup.runId}.`,
+    );
+  }
+  // Result/contract validation still runs before delivery, and the endpoint's
+  // returned commit must equal this event's head before anything is published.
+  // Server Retry-After lease waits share this finite completion deadline.
   await publishStandaloneResult({
     api: completionApi(config, deadlineMs),
     config,

@@ -1377,6 +1377,240 @@ describe("run v2 orchestration", () => {
     );
   });
 
+  describe.each(["auto-prover", "auto-fuzzer"] as const)(
+    "%s generated delivery recovery",
+    (workflow) => {
+      let followedUpRun: Run;
+
+      beforeEach(() => {
+        getConfigMock.mockReturnValue(standaloneConfig(workflow));
+        getGeneratedFollowupMock.mockResolvedValue({
+          runId: RUN_ID,
+          sourceCommitSha: "a".repeat(40),
+        });
+        followedUpRun = runResource(workflow);
+        followedUpRun.source.commit_sha = "a".repeat(40);
+        followedUpRun.client_reference = [
+          "certora-guardian",
+          "pr-42",
+          "a".repeat(40),
+          workflow,
+        ].join(":");
+        apiMethods.getRun.mockResolvedValue({
+          request_id: "req-followup",
+          run: followedUpRun,
+        });
+        apiMethods.getResult.mockResolvedValue(standaloneResult(workflow));
+        apiMethods.commitGeneratedFiles.mockResolvedValue({
+          ...commit,
+          delivery: { ...commit.delivery, commit_sha: HEAD_SHA },
+        });
+      });
+
+      afterEach(() => {
+        expect(apiMethods.estimateRun).not.toHaveBeenCalled();
+        expect(apiMethods.createRun).not.toHaveBeenCalled();
+        expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+        expect(createIdempotencyKeyMock).not.toHaveBeenCalled();
+      });
+
+      it.each(["pending", "failed"] as const)(
+        "reconciles a pushed generated child whose delivery remains %s",
+        async (status) => {
+          followedUpRun.delivery!.status = status;
+
+          await run();
+
+          expect(apiMethods.getRun).toHaveBeenCalledExactlyOnceWith(RUN_ID);
+          expect(
+            apiMethods.commitGeneratedFiles,
+          ).toHaveBeenCalledExactlyOnceWith(RUN_ID);
+          expect(setOutputMock).toHaveBeenCalledWith(
+            "generated-commit-sha",
+            HEAD_SHA,
+          );
+          expect(upsertPrCommentMock).toHaveBeenCalledWith(
+            42,
+            expect.any(String),
+            `<!-- certora-guardian-ci:${workflow} -->`,
+            HEAD_SHA,
+            RUN_ID,
+          );
+        },
+      );
+
+      it.each<[string, (candidate: Run) => void]>([
+        [
+          "run ID",
+          (candidate) => {
+            candidate.id = "22222222-2222-4222-8222-222222222222";
+          },
+        ],
+        [
+          "workflow",
+          (candidate) => {
+            candidate.run_type = "ai_auditor_full";
+          },
+        ],
+        [
+          "repository",
+          (candidate) => {
+            candidate.source.repository_url = "https://github.com/other/repo";
+          },
+        ],
+        [
+          "source parent",
+          (candidate) => {
+            candidate.source.commit_sha = "d".repeat(40);
+          },
+        ],
+        [
+          "client reference",
+          (candidate) => {
+            candidate.client_reference = "other-client";
+          },
+        ],
+        [
+          "pull request",
+          (candidate) => {
+            candidate.delivery!.pull_request_number = 43;
+          },
+        ],
+        [
+          "missing delivery",
+          (candidate) => {
+            candidate.delivery = null;
+          },
+        ],
+        [
+          "unfinished run",
+          (candidate) => {
+            candidate.status = "running";
+          },
+        ],
+        [
+          "skipped delivery",
+          (candidate) => {
+            candidate.delivery!.status = "skipped";
+          },
+        ],
+        [
+          "pending with contradictory commit",
+          (candidate) => {
+            candidate.delivery!.commit_sha = "d".repeat(40);
+          },
+        ],
+        [
+          "pending with contradictory outcome",
+          (candidate) => {
+            candidate.delivery!.outcome = "no_changes";
+          },
+        ],
+        [
+          "completed different head",
+          (candidate) => {
+            Object.assign(candidate.delivery!, {
+              status: "succeeded",
+              outcome: "committed",
+              commit_sha: "d".repeat(40),
+            });
+          },
+        ],
+        [
+          "completed no changes",
+          (candidate) => {
+            Object.assign(candidate.delivery!, {
+              status: "succeeded",
+              outcome: "no_changes",
+            });
+          },
+        ],
+      ])(
+        "rejects incompatible %s before attempting recovery",
+        async (_label, mutate) => {
+          mutate(followedUpRun);
+
+          await expect(run()).rejects.toThrow();
+
+          expect(apiMethods.getResult).not.toHaveBeenCalled();
+          expect(apiMethods.commitGeneratedFiles).not.toHaveBeenCalled();
+          expect(upsertPrCommentMock).not.toHaveBeenCalled();
+        },
+      );
+
+      it("rejects a different result contract before attempting recovery", async () => {
+        const result = standaloneResult(workflow);
+        result.result.data.contract.path = "src/Other.sol";
+        apiMethods.getResult.mockResolvedValue(result);
+
+        await expect(run()).rejects.toThrow("different contract");
+
+        expect(apiMethods.commitGeneratedFiles).not.toHaveBeenCalled();
+        expect(upsertPrCommentMock).not.toHaveBeenCalled();
+      });
+
+      it.each(["different head", "no changes"])(
+        "rejects recovered delivery with %s without publishing a summary",
+        async (kind) => {
+          apiMethods.commitGeneratedFiles.mockResolvedValue({
+            ...commit,
+            delivery:
+              kind === "different head"
+                ? commit.delivery
+                : {
+                    status: "no_changes",
+                    commit_sha: null,
+                    files: [],
+                    renamed_files: [],
+                  },
+          });
+
+          await expect(run()).rejects.toThrow(
+            "Generated follow-up commit mismatch",
+          );
+
+          expect(apiMethods.commitGeneratedFiles).toHaveBeenCalledOnce();
+          expect(upsertPrCommentMock).not.toHaveBeenCalled();
+        },
+      );
+
+      it("does not fall back to a paid launch when server reconciliation fails", async () => {
+        apiMethods.commitGeneratedFiles.mockRejectedValue(
+          new Error("Generated file set does not match the expected child"),
+        );
+
+        await expect(run()).rejects.toThrow(
+          "Generated file set does not match",
+        );
+
+        expect(upsertPrCommentMock).not.toHaveBeenCalled();
+      });
+
+      it("passes the shared deadline through recovery and stops on expiry", async () => {
+        const config = standaloneConfig(workflow);
+        const now = Date.now();
+        vi.spyOn(Date, "now").mockReturnValue(now);
+        try {
+          apiMethods.commitGeneratedFiles.mockRejectedValue(
+            new Error("The configured run timeout expired"),
+          );
+
+          await expect(run()).rejects.toThrow("run timeout expired");
+
+          expect(AutoProverApi).toHaveBeenLastCalledWith(
+            config.apiBaseUrl,
+            config.apiKey,
+            now + config.timeout * 60_000,
+          );
+          expect(apiMethods.commitGeneratedFiles).toHaveBeenCalledOnce();
+          expect(upsertPrCommentMock).not.toHaveBeenCalled();
+        } finally {
+          vi.spyOn(Date, "now").mockRestore();
+        }
+      });
+    },
+  );
+
   it.each(["auto-prover", "auto-fuzzer"] as const)(
     "binds %s's unchanged delivery summary to the source head and canonical audit",
     async (workflow) => {

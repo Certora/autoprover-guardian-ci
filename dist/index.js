@@ -33347,9 +33347,6 @@ const core = __importStar(__nccwpck_require__(7153));
 const github = __importStar(__nccwpck_require__(6137));
 const constants_1 = __nccwpck_require__(5851);
 const format_1 = __nccwpck_require__(4923);
-// Generated commits are immutable external state. Removing this protocol alias
-// can launch a duplicate paid run when an older generated commit is revisited.
-const LEGACY_GENERATED_RUN_TRAILER = "Zeus-Guardian-Job";
 function hasLeadingCommentMarker(body, marker) {
     // Report Markdown can itself quote a different workflow's marker. Only the
     // first line is protocol metadata; never treat report contents as identity.
@@ -33373,12 +33370,8 @@ function generatedRunIdFromCommitMessage(message) {
     while (lines.at(-1) === "")
         lines.pop();
     const trailer = lines.at(-1);
-    const match = trailer?.match(/^([^:]+): ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/);
-    if (match?.[1] !== "Certora-Guardian-Run" &&
-        match?.[1] !== LEGACY_GENERATED_RUN_TRAILER) {
-        return null;
-    }
-    return match[2] ?? null;
+    const match = trailer?.match(/^Certora-Guardian-Run: ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/);
+    return match?.[1] ?? null;
 }
 class GitHubClient {
     octokit;
@@ -34166,13 +34159,28 @@ async function tryGeneratedFollowup(config, api, ghClient, deadlineMs) {
         return false;
     const response = await api.getRun(followup.runId);
     validateRunIdentity(response.run, config, followup.runId, followup.sourceCommitSha);
+    const delivery = response.run.delivery;
+    const completedForHead = delivery?.status === "succeeded" &&
+        delivery.outcome === "committed" &&
+        delivery.commit_sha?.toLowerCase() === config.headCommitSha.toLowerCase();
+    // The GitHub push precedes the server's durable delivery completion. A
+    // follow-up can arrive while that write is pending, or after an ambiguous
+    // failure. Let the same run's replay-safe delivery endpoint reconcile the
+    // exact generated child (parent, files, hashes and modes) in those states.
+    // Contradictory completed delivery metadata must still fail closed.
+    const needsDeliveryRecovery = (delivery?.status === "pending" || delivery?.status === "failed") &&
+        delivery.outcome === null &&
+        delivery.commit_sha === null;
     if (response.run.status !== "succeeded" ||
-        response.run.delivery?.status !== "succeeded" ||
-        response.run.delivery.outcome !== "committed" ||
-        response.run.delivery.commit_sha?.toLowerCase() !==
-            config.headCommitSha.toLowerCase()) {
+        (!completedForHead && !needsDeliveryRecovery)) {
         throw new Error("Generated follow-up references an incompatible Certora run.");
     }
+    if (needsDeliveryRecovery) {
+        core.info(`Recovering generated-file delivery for Certora run ${followup.runId}.`);
+    }
+    // Result/contract validation still runs before delivery, and the endpoint's
+    // returned commit must equal this event's head before anything is published.
+    // Server Retry-After lease waits share this finite completion deadline.
     await publishStandaloneResult({
         api: completionApi(config, deadlineMs),
         config,

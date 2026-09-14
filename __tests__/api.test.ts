@@ -1028,6 +1028,64 @@ describe("AutoProverApi v2", () => {
     },
   );
 
+  it.each([true, false])(
+    "bounds pending generated-delivery lease recovery (completes: %s)",
+    async (completes) => {
+      vi.useFakeTimers();
+      const started = Date.now();
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+        Promise.resolve(
+          completes && Date.now() >= started + 10_000
+            ? new Response(
+                JSON.stringify({
+                  request_id: "recovered-delivery",
+                  delivery: {
+                    status: "committed",
+                    commit_sha: "b".repeat(40),
+                    files: [{ path: "certora/Vault.spec" }],
+                    renamed_files: [],
+                  },
+                }),
+              )
+            : new Response(
+                JSON.stringify({
+                  status: 409,
+                  code: "generated_files_delivery_in_progress",
+                  detail: "Generated-file delivery is already in progress.",
+                  retryable: true,
+                }),
+                { status: 409, headers: { "Retry-After": "2" } },
+              ),
+        ),
+      );
+      const api = new AutoProverApi(
+        "https://app.certora.com",
+        "certora_test",
+        started + 12_000,
+      );
+      const pending = api.commitGeneratedFiles(run.id);
+      // Attach the rejection assertion before advancing timers.
+      const outcome = completes
+        ? expect(pending).resolves.toMatchObject({
+            delivery: { commit_sha: "b".repeat(40) },
+          })
+        : expect(pending).rejects.toBeInstanceOf(AutoProverApiDeadlineError);
+
+      await vi.advanceTimersByTimeAsync(12_000);
+      await outcome;
+
+      expect(fetchMock).toHaveBeenCalledTimes(6);
+      for (const [url, options] of fetchMock.mock.calls) {
+        expect(url).toBe(
+          `https://app.certora.com/v2/runs/${run.id}/generated-files/commit`,
+        );
+        expect(options?.method).toBe("POST");
+        expect(options?.body).toBeUndefined();
+      }
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
   it("surfaces RFC problem details and scope guidance", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response(
