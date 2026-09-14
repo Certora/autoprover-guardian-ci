@@ -269,6 +269,19 @@ ready and billing is settled. A quota reset beyond the remaining budget stops
 polling without issuing an early cancellation request; the run ID remains
 available for recovery.
 
+Automatic context preparation appears as "Planning context". Terminal AutoContext
+failures display their code and detail: `auto_context_budget_exhausted`,
+`auto_context_timeout`, `auto_context_invalid_plan`, `auto_context_provider_error`,
+or `auto_context_configuration_error`. Review the scope or explicit context for
+budget/plan failures, and ask an administrator to fix configuration failures.
+Guardian does not automatically relaunch a run that fails during polling; explicitly
+rerun the GitHub workflow to request another attempt under the recovery rules above.
+
+For direct AI Auditor runs, successful and cancelled runs include actual AutoContext
+usage in the standard bill; failed runs receive a full refund. The server's default $5
+AutoContext provider-spend cap is not a flat customer fee or a client-configurable
+budget. No separate preview is required.
+
 PR summaries are scoped to workflow, model mode, immutable PR head, and canonical
 audit run. Guardian updates only comments that GitHub confirms were authored by
 the authenticated token identity. It skips publication for an outdated head,

@@ -1,4 +1,5 @@
 import * as core from "@actions/core";
+import { formatProgressPhase, formatRunFailure } from "./automatic-context";
 import {
   AutoProverApi,
   AutoProverApiDeadlineError,
@@ -746,7 +747,7 @@ async function pollRun(
       const progress = run.progress;
       core.info(
         progress
-          ? `Status: ${run.status} | Phase: ${progress.phase}${progress.percent === null ? "" : ` | Progress: ${progress.percent.toFixed(1)}%`}`
+          ? `Status: ${run.status} | Phase: ${formatProgressPhase(progress.phase)}${progress.percent === null ? "" : ` | Progress: ${progress.percent.toFixed(1)}%`}`
           : `Status: ${run.status}`,
       );
     } catch (error) {
@@ -1076,7 +1077,7 @@ export async function run(): Promise<void> {
 
   if (currentRun.status === "failed") {
     core.setFailed(
-      `Certora run failed: ${currentRun.failure?.detail ?? "Unknown error"}`,
+      `Certora run failed: ${formatRunFailure(currentRun.failure)}`,
     );
     return;
   }

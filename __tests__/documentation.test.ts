@@ -5,6 +5,13 @@ const readme = readFileSync("README.md", "utf8");
 const action = readFileSync("action.yml", "utf8");
 
 describe("published v2 documentation", () => {
+  it("documents bounded AutoContext failure and billing without a client budget", () => {
+    const text = readme.replace(/\s+/g, " ");
+    expect(text).toContain("successful and cancelled runs include actual AutoContext usage in the standard bill");
+    expect(text).toContain("failed runs receive a full refund");
+    expect(text).toContain("not a flat customer fee or a client-configurable budget");
+    expect(text).toContain("explicitly rerun the GitHub workflow");
+  });
   it("documents model modes without changing iteration or omitted-input defaults", () => {
     const normalizedReadme = readme.replace(/\s+/g, " ");
     expect(normalizedReadme).toContain("`model-mode` selects the AI Auditor model set: `normal` or `frontier`");

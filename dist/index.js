@@ -32488,6 +32488,44 @@ exports.AutoProverApi = AutoProverApi;
 
 /***/ }),
 
+/***/ 6891:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.AUTO_CONTEXT_FAILURE_CODES = void 0;
+exports.formatRunFailure = formatRunFailure;
+exports.formatProgressPhase = formatProgressPhase;
+exports.AUTO_CONTEXT_FAILURE_CODES = [
+    "auto_context_budget_exhausted",
+    "auto_context_timeout",
+    "auto_context_invalid_plan",
+    "auto_context_provider_error",
+    "auto_context_configuration_error",
+];
+function formatRunFailure(failure) {
+    if (!failure)
+        return "Unknown error";
+    if (!exports.AUTO_CONTEXT_FAILURE_CODES.includes(failure.code)) {
+        return failure.detail;
+    }
+    const guidance = failure.code === "auto_context_configuration_error"
+        ? "Ask your administrator to correct the AutoContext configuration, then explicitly rerun the GitHub workflow."
+        : failure.code === "auto_context_budget_exhausted" || failure.code === "auto_context_invalid_plan"
+            ? "Review the audit scope or supply explicit context, then explicitly rerun the GitHub workflow."
+            : "Explicitly rerun the GitHub workflow when you want to try again.";
+    return `[${failure.code}] ${failure.detail} ${guidance} Guardian will not automatically relaunch this failed run.`;
+}
+function formatProgressPhase(phase) {
+    return phase === "planning_context" || phase === "_11_context_preparation"
+        ? "Planning context"
+        : phase;
+}
+
+
+/***/ }),
+
 /***/ 6878:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -33664,6 +33702,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.buildRunRequest = buildRunRequest;
 exports.run = run;
 const core = __importStar(__nccwpck_require__(7153));
+const automatic_context_1 = __nccwpck_require__(6891);
 const api_1 = __nccwpck_require__(7822);
 const config_1 = __nccwpck_require__(6878);
 const format_1 = __nccwpck_require__(4923);
@@ -34180,7 +34219,7 @@ async function pollRun(api, initialRun, runId, config, pollIntervalSeconds, time
             consecutiveFailures = 0;
             const progress = run.progress;
             core.info(progress
-                ? `Status: ${run.status} | Phase: ${progress.phase}${progress.percent === null ? "" : ` | Progress: ${progress.percent.toFixed(1)}%`}`
+                ? `Status: ${run.status} | Phase: ${(0, automatic_context_1.formatProgressPhase)(progress.phase)}${progress.percent === null ? "" : ` | Progress: ${progress.percent.toFixed(1)}%`}`
                 : `Status: ${run.status}`);
         }
         catch (error) {
@@ -34393,7 +34432,7 @@ async function run() {
         break;
     }
     if (currentRun.status === "failed") {
-        core.setFailed(`Certora run failed: ${currentRun.failure?.detail ?? "Unknown error"}`);
+        core.setFailed(`Certora run failed: ${(0, automatic_context_1.formatRunFailure)(currentRun.failure)}`);
         return;
     }
     if (currentRun.status === "cancelled") {

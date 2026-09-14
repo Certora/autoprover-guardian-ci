@@ -45,6 +45,7 @@ vi.mock("../src/github", () => ({
 // Keep config parsing, request building, idempotency, HTTP retries, response
 // validation, and polling real. Only the external HTTP/GitHub boundaries are fake.
 import { AutoProverApiError } from "../src/api";
+import { AUTO_CONTEXT_FAILURE_CODES } from "../src/automatic-context";
 import { run } from "../src/run";
 import type { Run } from "../src/types";
 import { workflowRunType } from "../src/types";
@@ -420,6 +421,31 @@ describe("automatic context through the real Guardian request pipeline", () => {
       expect(setFailed).toHaveBeenCalledWith(
         "Certora run failed: Context selection failed",
       );
+    });
+
+    it.each(AUTO_CONTEXT_FAILURE_CODES)("reports %s without automatically relaunching", async (code) => {
+      const detail = "Automatic context preparation stopped safely.";
+      fetchMock
+        .mockResolvedValueOnce(runResponse(workflow, "queued"))
+        .mockResolvedValueOnce(runResponse(workflow, "running", {
+          progress: { phase: "planning_context", percent: null, completed_steps: 0, total_steps: null },
+        }))
+        .mockResolvedValueOnce(runResponse(workflow, "failed", {
+          failure: { code, detail, retryable: true },
+          billing: { status: "settled", reserved_usd: "42.1250", charged_usd: "0.0000" },
+        }));
+
+      const pending = run();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await pending;
+
+      assertAutomaticLaunch(workflow);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(info).toHaveBeenCalledWith("Status: running | Phase: Planning context");
+      expect(setFailed).toHaveBeenCalledWith(expect.stringContaining(`[${code}] ${detail}`));
+      expect(setFailed).toHaveBeenCalledWith(expect.stringContaining("rerun the GitHub workflow"));
+      expect(setFailed).toHaveBeenCalledWith(expect.stringContaining("will not automatically relaunch"));
+      expect(setOutput).toHaveBeenCalledWith("status", "failed");
     });
 
     it("preserves manual mixed-language patterns without an estimate blocking recovery", async () => {
