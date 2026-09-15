@@ -10,6 +10,7 @@ import type {
   AiAuditorFullRunRequest,
   Run,
   RunRequest,
+  ServerManagedGithubDelivery,
   Workflow,
 } from "../src/types";
 import { workflowRunType } from "../src/types";
@@ -45,9 +46,72 @@ const run: Run = {
   dashboard_url: "https://app.certora.com/runs/1",
 };
 
+function serverDelivery(): ServerManagedGithubDelivery {
+  return {
+    type: "github_pull_request",
+    pull_request_number: 42,
+    managed_by: "server",
+    status: "pending",
+    check: {
+      id: 12345,
+      name: "Zeus AI Audit",
+      head_sha: "a".repeat(40),
+      html_url: "https://github.com/Certora/contracts/runs/12345",
+      status: "in_progress",
+    },
+    error: null,
+  };
+}
+
 describe("AutoProverApi v2", () => {
   beforeEach(() => vi.restoreAllMocks());
   afterEach(() => vi.useRealTimers());
+
+  it.each(["pending", "in_progress", "completed"] as const)(
+    "decodes a persisted server check with delivery status %s",
+    async (status) => {
+      const delivery = serverDelivery();
+      delivery.status = status;
+      if (status === "completed") delivery.check.status = "completed";
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(
+        JSON.stringify({ request_id: "check", run: { ...run, delivery } }),
+        { status: 201 },
+      ));
+      const api = new AutoProverApi("https://app.certora.com", "certora_test");
+      const response = await api.createRun("ai-auditor-full", body, "stable-key");
+      expect(response.run.delivery).toEqual(delivery);
+    },
+  );
+
+  it.each([
+    ["unowned", (delivery: any) => ({ ...delivery, managed_by: "client" })],
+    ["missing check", (delivery: any) => ({ ...delivery, check: null })],
+    ["invalid PR", (delivery: any) => ({ ...delivery, pull_request_number: 0 })],
+    ["invalid ID", (delivery: any) => ({ ...delivery, check: { ...delivery.check, id: -1 } })],
+    ["fractional ID", (delivery: any) => ({ ...delivery, check: { ...delivery.check, id: 1.5 } })],
+    ["wrong name", (delivery: any) => ({ ...delivery, check: { ...delivery.check, name: "Other check" } })],
+    ["invalid head", (delivery: any) => ({ ...delivery, check: { ...delivery.check, head_sha: "main" } })],
+    ["uncreated check", (delivery: any) => ({ ...delivery, check: { ...delivery.check, status: "queued" } })],
+    ["insecure URL", (delivery: any) => ({ ...delivery, check: { ...delivery.check, html_url: "http://github.com/Certora/contracts/runs/12345" } })],
+    ["untrusted URL", (delivery: any) => ({ ...delivery, check: { ...delivery.check, html_url: "https://attacker.invalid/check" } })],
+    ["credential URL", (delivery: any) => ({ ...delivery, check: { ...delivery.check, html_url: "https://user:secret@github.com/Certora/contracts/runs/12345" } })],
+  ])("rejects malformed server handshakes: %s", async (_label, mutate) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(
+      JSON.stringify({ request_id: "check", run: { ...run, delivery: mutate(serverDelivery()) } }),
+      { status: 201 },
+    ));
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+    await expect(api.createRun("ai-auditor-full", body, "stable-key")).rejects.toThrow("malformed run");
+  });
+
+  it("does not reinterpret standalone generated-file delivery as an audit check", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(
+      JSON.stringify({ request_id: "check", run: { ...run, run_type: "auto_prover", delivery: serverDelivery() } }),
+      { status: 201 },
+    ));
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+    await expect(api.getRun(run.id)).rejects.toThrow("server-managed audit delivery on a different workflow");
+  });
 
   it("estimates through the workflow collection with Bearer authentication", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(

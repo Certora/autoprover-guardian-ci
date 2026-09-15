@@ -78,6 +78,7 @@ function aiConfig(
 ): AiAuditorActionConfig {
   return {
     workflow,
+    waitForCompletion: true,
     apiKey: "certora_test",
     apiBaseUrl: "https://app.certora.com",
     githubToken: "ghs_local_only",
@@ -246,6 +247,30 @@ function estimate(canLaunch = true, estimateQuoteId?: string) {
   };
 }
 
+function managedAuditRun(
+  workflow: "ai-auditor-full" | "ai-auditor-diff" = "ai-auditor-diff",
+  status: Run["status"] = "queued",
+): Run {
+  const terminal = ["succeeded", "failed", "cancelled"].includes(status);
+  return {
+    ...runResource(workflow, status),
+    delivery: {
+      type: "github_pull_request",
+      pull_request_number: 42,
+      managed_by: "server",
+      status: terminal ? "completed" : "pending",
+      check: {
+        id: 12345,
+        name: "Zeus AI Audit",
+        head_sha: HEAD_SHA,
+        html_url: "https://github.com/Certora/contracts/runs/12345",
+        status: terminal ? "completed" : "in_progress",
+      },
+      error: null,
+    },
+  };
+}
+
 function aiResult(workflow: "ai-auditor-full" | "ai-auditor-diff") {
   return {
     request_id: "req-result",
@@ -360,6 +385,137 @@ describe("run v2 orchestration", () => {
       run: runResource("ai-auditor-diff", "cancelling"),
     });
     apiMethods.commitGeneratedFiles.mockResolvedValue(commit);
+  });
+
+  describe("asynchronous full/diff audit handoff", () => {
+    it.each(["ai-auditor-full", "ai-auditor-diff"] as const)(
+      "hands off %s only with a persisted check and no local result work",
+      async (workflow) => {
+        const config = {
+          ...aiConfig(workflow),
+          waitForCompletion: false,
+          createIssues: true,
+          commentOnPr: true,
+          failOn: ["HIGH"] as const,
+        };
+        getConfigMock.mockReturnValue(config);
+        apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: managedAuditRun(workflow) });
+
+        await run();
+
+        expect(apiMethods.createRun).toHaveBeenCalledWith(workflow, expect.objectContaining({
+          delivery: {
+            type: "github_pull_request",
+            pull_request_number: 42,
+            head_commit_sha: HEAD_SHA,
+            create_issues: true,
+            comment_on_pr: true,
+            issue_severities: ["HIGH", "MEDIUM"],
+            fail_on: ["HIGH"],
+            labels: ["ai-auditor", "security"],
+          },
+        }), "certora-guardian-stable");
+        expect(JSON.stringify(apiMethods.createRun.mock.calls)).not.toContain("ghs_local_only");
+        expect(apiMethods.getRun).not.toHaveBeenCalled();
+        expect(apiMethods.getResult).not.toHaveBeenCalled();
+        expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+        expect(upsertPrCommentMock).not.toHaveBeenCalled();
+        expect(setFailedMock).not.toHaveBeenCalled();
+        expect(setOutputMock).toHaveBeenCalledWith("run-id", RUN_ID);
+        expect(setOutputMock).toHaveBeenCalledWith("status", "queued");
+        expect(setOutputMock).toHaveBeenCalledWith("check-run-id", "12345");
+        expect(setOutputMock).toHaveBeenCalledWith("check-run-url", "https://github.com/Certora/contracts/runs/12345");
+        for (const name of ["highs-count", "mediums-count", "lows-count", "infos-count"]) {
+          expect(setOutputMock.mock.calls.filter(([output]) => output === name).at(-1)).toEqual([name, ""]);
+        }
+      },
+    );
+
+    it.each([
+      ["absent delivery", () => null],
+      ["absent check", (delivery: any) => ({ ...delivery, check: undefined })],
+      ["unowned check", (delivery: any) => ({ ...delivery, managed_by: "client" })],
+      ["wrong PR", (delivery: any) => ({ ...delivery, pull_request_number: 43 })],
+      ["wrong head", (delivery: any) => ({ ...delivery, check: { ...delivery.check, head_sha: "c".repeat(40) } })],
+      ["invalid check ID", (delivery: any) => ({ ...delivery, check: { ...delivery.check, id: 0 } })],
+      ["wrong check name", (delivery: any) => ({ ...delivery, check: { ...delivery.check, name: "Unrelated check" } })],
+      ["wrong repository", (delivery: any) => ({ ...delivery, check: { ...delivery.check, html_url: "https://github.com/Other/repo/runs/12345" } })],
+    ])("fails closed for %s without cancelling the accepted audit", async (_label, mutate) => {
+      getConfigMock.mockReturnValue({ ...aiConfig(), waitForCompletion: false });
+      const accepted = managedAuditRun();
+      accepted.delivery = mutate(accepted.delivery);
+      apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: accepted });
+
+      await expect(run()).rejects.toThrow("did not confirm a server-owned Zeus AI Audit check");
+
+      expect(setOutputMock).toHaveBeenCalledWith("run-id", RUN_ID);
+      expect(apiMethods.getRun).not.toHaveBeenCalled();
+      expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+      expect(apiMethods.getResult).not.toHaveBeenCalled();
+      expect(setOutputMock).not.toHaveBeenCalledWith("check-run-id", "12345");
+    });
+
+    it("keeps an accepted audit when rerun status refresh fails", async () => {
+      getConfigMock.mockReturnValue({ ...aiConfig(), waitForCompletion: false, githubRunAttempt: 2 });
+      apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: managedAuditRun() });
+      apiMethods.getRun.mockRejectedValue(new Error("Temporary projection failure"));
+
+      await expect(run()).rejects.toThrow("Temporary projection failure");
+
+      expect(setOutputMock).toHaveBeenCalledWith("run-id", RUN_ID);
+      expect(apiMethods.createRun).toHaveBeenCalledTimes(1);
+      expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+    });
+
+    it.each(["succeeded", "failed", "cancelled"] as const)(
+      "reuses the server's completed check for a recovered %s audit",
+      async (status) => {
+        getConfigMock.mockReturnValue({ ...aiConfig(), waitForCompletion: false });
+        apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: managedAuditRun("ai-auditor-diff", status) });
+        await run();
+        expect(setFailedMock).not.toHaveBeenCalled();
+        expect(apiMethods.getResult).not.toHaveBeenCalled();
+        expect(apiMethods.createRun).toHaveBeenCalledTimes(1);
+        expect(setOutputMock).toHaveBeenCalledWith("status", status);
+        expect(setOutputMock).toHaveBeenCalledWith("check-run-id", "12345");
+      },
+    );
+
+    it("retries a previously failed canonical audit once on an explicit GitHub rerun", async () => {
+      const config = { ...aiConfig(), waitForCompletion: false, githubRunAttempt: 2 };
+      getConfigMock.mockReturnValue(config);
+      apiMethods.createRun
+        .mockResolvedValueOnce({ request_id: "canonical", run: managedAuditRun() })
+        .mockResolvedValueOnce({ request_id: "retry", run: { ...managedAuditRun(), id: RETRY_RUN_ID } });
+      apiMethods.getRun.mockResolvedValue({ request_id: "refresh", run: managedAuditRun("ai-auditor-diff", "failed") });
+
+      await run();
+
+      expect(apiMethods.createRun).toHaveBeenCalledTimes(2);
+      expect(apiMethods.getRun).toHaveBeenCalledTimes(1);
+      expect(createIdempotencyKeyMock).toHaveBeenLastCalledWith(
+        config.workflow,
+        expect.objectContaining({ delivery: expect.objectContaining({ type: "github_pull_request" }) }),
+        `${config.idempotencySeed}:github-rerun-attempt:2`,
+      );
+      expect(setOutputMock).toHaveBeenCalledWith("run-id", RETRY_RUN_ID);
+      expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+    });
+
+    it("does not cancel a handed-off audit when the runner later receives SIGTERM", async () => {
+      getConfigMock.mockReturnValue({ ...aiConfig(), waitForCompletion: false });
+      apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: managedAuditRun() });
+      await run();
+
+      const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+      try {
+        process.emit("SIGTERM");
+        await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(1));
+        expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+      } finally {
+        exit.mockRestore();
+      }
+    });
   });
 
   describe.each(["normal", "frontier"] as const)(

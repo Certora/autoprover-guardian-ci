@@ -296,6 +296,20 @@ export function getConfig(): ActionConfig {
   }
   const repositoryPrivate = repositoryPrivateValue;
   const workflow = parseWorkflow(core.getInput("workflow"));
+  const waitForCompletion = parseBoolean(
+    core.getInput("wait-for-completion"),
+    "wait-for-completion",
+    workflow !== "ai-auditor-full" && workflow !== "ai-auditor-diff",
+  );
+  if (
+    !waitForCompletion &&
+    workflow !== "ai-auditor-full" &&
+    workflow !== "ai-auditor-diff"
+  ) {
+    throw new Error(
+      "wait-for-completion: false is only supported by full/diff AI Auditor workflows.",
+    );
+  }
   const modelModeInput = core.getInput("model-mode");
   if (workflow === "auto-prover" || workflow === "auto-fuzzer") {
     if (modelModeInput.trim()) {
@@ -451,6 +465,7 @@ export function getConfig(): ActionConfig {
       INSTRUCTIONS_MAX,
     ),
     useMemory: parseBoolean(core.getInput("use-memory"), "use-memory", true),
+    waitForCompletion,
     maxIterations,
     skipSubmodules: parseBoolean(
       core.getInput("skip-submodules"),

@@ -69,9 +69,35 @@ describe("getConfig v2", () => {
       idempotencySeed: expect.stringContaining("123:certora"),
       context: ["contracts/**/*.sol"],
       useMemory: true,
+      waitForCompletion: false,
     });
     expect(setSecretMock).toHaveBeenCalledWith("certora_test");
     expect(setSecretMock).toHaveBeenCalledWith("ghs_test");
+  });
+
+  it.each(["ai-auditor-full", "ai-auditor-diff"])(
+    "supports an explicit synchronous override for %s",
+    (workflow) => {
+      inputs.set("workflow", workflow);
+      inputs.set("wait-for-completion", "true");
+      expect(getConfig()).toMatchObject({ waitForCompletion: true });
+      inputs.set("wait-for-completion", "false");
+      expect(getConfig()).toMatchObject({ waitForCompletion: false });
+    },
+  );
+
+  it.each(["auto-prover", "auto-fuzzer", "ai-auditor-finding-validation"])(
+    "does not silently detach unsupported workflow %s",
+    (workflow) => {
+      inputs.set("workflow", workflow);
+      inputs.set("wait-for-completion", "false");
+      expect(() => getConfig()).toThrow("only supported by full/diff AI Auditor");
+    },
+  );
+
+  it("rejects malformed wait-for-completion values", () => {
+    inputs.set("wait-for-completion", "sometimes");
+    expect(() => getConfig()).toThrow("wait-for-completion must be either true or false");
   });
 
   it.each(["ai-auditor-full", "ai-auditor-diff", "ai-auditor-finding-validation"])(

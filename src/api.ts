@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import * as core from "@actions/core";
+import { isServerManagedGithubDelivery } from "./delivery";
 import type {
   CommitGeneratedFilesResponse,
   EstimateResponse,
@@ -216,6 +217,28 @@ function isHttpUrl(value: unknown): value is string {
   }
 }
 
+function isRunDelivery(value: unknown): boolean {
+  if (value === null || isServerManagedGithubDelivery(value)) return true;
+  return (
+    isRecord(value) &&
+    !("managed_by" in value) &&
+    value.type === "github_pull_request" &&
+    Number.isSafeInteger(value.pull_request_number) &&
+    (value.pull_request_number as number) > 0 &&
+    typeof value.status === "string" &&
+    DELIVERY_STATUSES.has(value.status) &&
+    (value.outcome === null ||
+      (typeof value.outcome === "string" && DELIVERY_OUTCOMES.has(value.outcome))) &&
+    (value.commit_sha === null ||
+      (typeof value.commit_sha === "string" && SHA_REGEX.test(value.commit_sha))) &&
+    Array.isArray(value.files) &&
+    value.files.every(isDeliveryFile) &&
+    Array.isArray(value.renamed_files) &&
+    value.renamed_files.every(isRenamedFile) &&
+    isNullableString(value.error)
+  );
+}
+
 function decodeRun(value: unknown): RunResponse {
   const envelope = requestEnvelope(value);
   const run = envelope.run;
@@ -249,24 +272,7 @@ function decodeRun(value: unknown): RunResponse {
         typeof run.failure.code !== "string" ||
         typeof run.failure.detail !== "string" ||
         typeof run.failure.retryable !== "boolean")) ||
-    (run.delivery !== null &&
-      (!isRecord(run.delivery) ||
-        run.delivery.type !== "github_pull_request" ||
-        !Number.isSafeInteger(run.delivery.pull_request_number) ||
-        (run.delivery.pull_request_number as number) <= 0 ||
-        typeof run.delivery.status !== "string" ||
-        !DELIVERY_STATUSES.has(run.delivery.status) ||
-        (run.delivery.outcome !== null &&
-          (typeof run.delivery.outcome !== "string" ||
-            !DELIVERY_OUTCOMES.has(run.delivery.outcome))) ||
-        (run.delivery.commit_sha !== null &&
-          (typeof run.delivery.commit_sha !== "string" ||
-            !SHA_REGEX.test(run.delivery.commit_sha))) ||
-        !Array.isArray(run.delivery.files) ||
-        !run.delivery.files.every(isDeliveryFile) ||
-        !Array.isArray(run.delivery.renamed_files) ||
-        !run.delivery.renamed_files.every(isRenamedFile) ||
-        !isNullableString(run.delivery.error))) ||
+    !isRunDelivery(run.delivery) ||
     typeof run.cancellable !== "boolean" ||
     typeof run.created_at !== "string" ||
     !isNullableString(run.started_at) ||
@@ -302,7 +308,14 @@ function decodeRun(value: unknown): RunResponse {
   ) {
     invalidResponse("terminal run with unsettled billing");
   }
-  if (isRecord(run.delivery)) {
+  if (
+    isServerManagedGithubDelivery(run.delivery) &&
+    run.run_type !== "ai_auditor_full" &&
+    run.run_type !== "ai_auditor_diff"
+  ) {
+    invalidResponse("server-managed audit delivery on a different workflow");
+  }
+  if (isRecord(run.delivery) && !isServerManagedGithubDelivery(run.delivery)) {
     if (
       (run.delivery.status === "succeeded" &&
         (typeof run.delivery.outcome !== "string" ||

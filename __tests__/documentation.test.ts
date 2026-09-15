@@ -5,6 +5,20 @@ const readme = readFileSync("README.md", "utf8");
 const action = readFileSync("action.yml", "utf8");
 
 describe("published v2 documentation", () => {
+  it("distinguishes successful asynchronous handoff from a successful audit", () => {
+    const text = readme.replace(/\s+/g, " ");
+    expect(text).toContain("`wait-for-completion` defaults to `false`");
+    expect(text).toContain("Zeus AI Audit");
+    expect(text).toContain("handoff succeeded");
+    expect(text).toContain("96 hours");
+    expect(text).toContain("does not require a 96-hour GitHub runner");
+    expect(text).toContain("Finding-count outputs are empty");
+    expect(text).toContain("does not cancel the audit");
+    expect(text).toContain("`wait-for-completion: true`");
+    expect(text).toContain("defaults to 120 minutes");
+    expect(action).toContain("does not set the server audit deadline");
+  });
+
   it("documents bounded AutoContext failure and billing without a client budget", () => {
     const text = readme.replace(/\s+/g, " ");
     expect(text).toContain("successful and cancelled runs include actual AutoContext usage in the standard bill");

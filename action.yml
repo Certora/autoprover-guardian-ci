@@ -68,8 +68,13 @@ inputs:
     required: false
     default: "60"
 
+  wait-for-completion:
+    description: "Full/diff AI Auditor: wait on this runner for completion. Empty defaults to false and hands off to the server-owned Zeus AI Audit check. Other workflows remain synchronous."
+    required: false
+    default: ""
+
   timeout:
-    description: "Maximum minutes to wait for run completion"
+    description: "Maximum runner minutes for launch/handoff, or completion when wait-for-completion is true (does not set the server audit deadline)"
     required: false
     default: "120"
 
@@ -121,17 +126,23 @@ outputs:
   status:
     description: "Last known run status (queued, running, finalizing, succeeded, failed, cancelling, or cancelled)"
 
+  check-run-id:
+    description: "Server-owned Zeus AI Audit GitHub check ID after asynchronous handoff"
+
+  check-run-url:
+    description: "Server-owned Zeus AI Audit GitHub check URL after asynchronous handoff"
+
   highs-count:
-    description: "AI Auditor HIGH severity finding count"
+    description: "AI Auditor HIGH severity finding count; empty after asynchronous handoff"
 
   mediums-count:
-    description: "AI Auditor MEDIUM severity finding count"
+    description: "AI Auditor MEDIUM severity finding count; empty after asynchronous handoff"
 
   lows-count:
-    description: "AI Auditor LOW severity finding count"
+    description: "AI Auditor LOW severity finding count; empty after asynchronous handoff"
 
   infos-count:
-    description: "AI Auditor INFO severity finding count"
+    description: "AI Auditor INFO severity finding count; empty after asynchronous handoff"
 
   issues-created:
     description: "AI Auditor comma-separated list of created issue references (for example, #123)"

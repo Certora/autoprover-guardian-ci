@@ -14,8 +14,12 @@ without a separate estimate or preview. Launches use a deterministic
 and validates source, calculates pricing, and reserves balance for new runs.
 The public API still supports optional estimates and the AISS
 `Estimate-Quote-Id` header for other callers; Guardian does not need either.
-Guardian polls the canonical run resource until it succeeds, fails, or is
-cancelled. There is no separate progress endpoint.
+Full/diff AI Auditor runs use an asynchronous handoff by default: the Action
+finishes successfully after the server confirms a persisted **Zeus AI Audit**
+check on the pull request head. That separate check stays pending while the
+audit runs and receives the terminal outcome. Other workflows, and full/diff
+runs with `wait-for-completion: true`, poll the canonical run resource until
+completion. There is no separate progress endpoint.
 
 ## Quick start
 
@@ -23,6 +27,12 @@ Create an organization API key with the required run scopes in the Certora
 dashboard, then save it as a repository secret named `CERTORA_API_KEY`.
 Guardian needs `runs:create` and `runs:read`; grant `runs:cancel` for timeout
 cancellation and `generated_files:write` for AutoProver or AutoFuzzer delivery.
+For asynchronous full/diff audits, connect the organization's GitHub App with
+repository access, **Checks: write**, and pull-request read access. Approve
+**Pull requests: write** for PR summaries and **Issues: write** for finding issues
+when those publishing options are enabled. Existing installations must approve
+newly requested permissions. The server uses the App's credentials, never the
+Action's `github-token`, to finish delivery.
 
 Omit `context` or leave it empty to let the server select context during launch.
 No preview or preparation token is required. Full audits require `scope` when
@@ -68,6 +78,55 @@ jobs:
 The API key is sent as a Bearer token only to the configured Certora API base
 URL. `github-token` remains inside the action and is used only for GitHub issue,
 comment, and commit-follow-up operations. It is never sent to Certora.
+
+## Asynchronous audit checks
+
+For full/diff AI Auditor, `wait-for-completion` defaults to `false`. The server
+persists the PR number, immutable head SHA, and `comment-on-pr`, `create-issues`,
+`issue-severities`, `fail-on`, and `labels` settings at launch. Before the Action
+can exit green, the server must acknowledge an actual **Zeus AI Audit** check
+ID bound to that PR and commit. An absent or mismatched acknowledgement fails
+the Action; a launch response alone is not sufficient. The accepted audit is
+not cancelled on handshake/transport errors; recover it with the same inputs
+and API key.
+
+Asynchronous AI Auditor delivery currently supports **same-repository pull
+requests only**. Both the PR base and head must belong to the audited repository.
+The server rejects fork PRs during preflight, before reserving balance or
+starting paid audit work. This restriction applies to asynchronous full/diff
+delivery, independently of the separate AutoProver/AutoFuzzer fork restrictions.
+
+The persisted **Zeus AI Audit** check is owned by the organization's installed
+GitHub App. Approve the App permissions above on the installation; workflow
+`permissions` only configure the runner's `GITHUB_TOKEN` and do not grant App
+permissions. The server mints fresh installation tokens for final reporting and
+never persists the runner's temporary token.
+
+The launch job's green result means **handoff succeeded**, not "no findings".
+Use **Zeus AI Audit** as the required audit check in branch protection. The
+server keeps it pending until the audit is terminal, applies `fail-on`, and
+publishes the configured PR summary/issues. `check-run-id` and `check-run-url`
+identify that check; finding-count outputs are empty because this runner has
+not waited for results. Failed audits and findings matching `fail-on` are
+reported by the separate check, not by a runner that already finished.
+
+The server's audit deadline is up to **96 hours**. This does not require a
+96-hour GitHub runner: the Action only waits for launch and check handoff.
+After successful handoff, ending or cancelling the GitHub workflow does not
+cancel the audit. Use the Certora dashboard or the run cancellation API.
+
+Set `wait-for-completion: true` to retain synchronous polling and local result,
+comment, issue, and `fail-on` handling. Its `timeout` still defaults to 120
+minutes; GitHub's runner/job limits also apply, and increasing this input does
+not override them. Finding validation, AutoProver, and AutoFuzzer remain
+synchronous; explicitly setting `wait-for-completion: false` for those workflows
+is rejected.
+
+Deploy a server supporting this handoff before enabling asynchronous runs.
+When recovering a run launched by the legacy synchronous Action, explicitly
+set `wait-for-completion: true` to preserve its launch body and idempotency key.
+Changing delivery mode/settings changes the launch identity; do not switch
+modes merely to recover an ambiguous or still-running launch.
 
 ## Repository access
 
@@ -237,7 +296,7 @@ launch body, so transient timeouts, action process restarts, and GitHub rerun
 attempts first recover the same launch while the server retains the idempotency
 record. Guardian refreshes the canonical run on a GitHub rerun, since replayed
 launch responses can still contain their original queued status. A recovered queued or running run is
-polled, and a recovered successful run is reused, without a second launch. Only
+handed off asynchronously or polled synchronously, and a recovered successful run is reused, without a second launch. Only
 when a GitHub rerun finds that canonical run already `failed` or `cancelled`
 does Guardian launch one retry with a key scoped to that GitHub run attempt.
 That retry key is stable for restarts within the attempt. A new workflow run or
@@ -251,15 +310,16 @@ a run or reservation can expire after 24 hours. Records removed before this
 retention fix cannot be restored automatically. A recovered run needs no new
 estimate or balance reservation; new launches still enforce all server checks.
 
-`timeout` is a shared budget for API launch/recovery, polling, and result/file
-delivery. Retriable launches keep the same key until that deadline, including
+`timeout` is a shared budget for API launch/recovery and check handoff, or for
+polling and result/file delivery in synchronous mode. It does not change the
+server's audit deadline. Retriable launches keep the same key until that deadline, including
 when a request times out before the server finishes. `Retry-After` is respected
 even for long quota resets; if the wait cannot fit, Guardian stops with recovery
 guidance instead of retrying early. Cancellation gets up to 15 seconds of grace;
 a run that succeeds during cancellation gets a bounded 15-second completion
 grace to fetch its report and deliver files. Neither grace can launch an audit.
 
-Guardian polls `GET /v2/runs/{run_id}`. Progress is displayed from the run's
+In synchronous mode Guardian polls `GET /v2/runs/{run_id}`. Progress is displayed from the run's
 embedded `progress` object. On timeout or five consecutive polling failures it
 requests cancellation when the server marks the run cancellable. Canonical
 statuses are `queued`, `running`, `finalizing`, `succeeded`, `failed`,
@@ -281,7 +341,7 @@ usage in the standard bill; failed runs receive a full refund. The server's defa
 AutoContext provider-spend cap is not a flat customer fee or a client-configurable
 budget. No separate preview is required.
 
-PR summaries are scoped to workflow, model mode, immutable PR head, and canonical
+For synchronous delivery, PR summaries are scoped to workflow, model mode, immutable PR head, and canonical
 audit run. Guardian updates only comments that GitHub confirms were authored by
 the authenticated token identity. It skips publication for an outdated head,
 and a late older audit cannot overwrite a newer audit's summary. Legacy unscoped
@@ -310,7 +370,8 @@ errors, so correcting the repository access or path and rerunning is safe.
 | `github-token`      | No                 | `${{ github.token }}`     | Local GitHub operations only; never sent to Certora    |
 | `api-base-url`      | No                 | `https://app.certora.com` | Certora API base URL                                   |
 | `poll-interval`     | No                 | `60`                      | Seconds between run polls                              |
-| `timeout`           | No                 | `120`                     | Maximum minutes to wait                                |
+| `wait-for-completion` | No               | `false` for full/diff; otherwise `true` | Wait on this runner; false requires the server-owned audit check |
+| `timeout`           | No                 | `120`                     | Runner minutes for launch/handoff or synchronous completion, not the server deadline |
 | `create-issues`     | No                 | `true`                    | Create AI Auditor finding issues                       |
 | `issue-severities`  | No                 | `HIGH,MEDIUM`             | Severities that create issues                          |
 | `comment-on-pr`     | No                 | `true`                    | Post or update the PR summary                          |
@@ -329,6 +390,8 @@ errors, so correcting the repository access or path and rerunning is safe.
 | `workflow`             | Selected workflow                                  |
 | `model-mode`           | AI Auditor mode; empty for other engines or unrecorded historical runs |
 | `status`               | Last canonical run status                          |
+| `check-run-id`         | Server-owned Zeus AI Audit check ID after async handoff |
+| `check-run-url`        | Server-owned Zeus AI Audit check URL after async handoff |
 | `highs-count`          | AI Auditor HIGH finding count                      |
 | `mediums-count`        | AI Auditor MEDIUM finding count                    |
 | `lows-count`           | AI Auditor LOW finding count                       |
@@ -339,6 +402,9 @@ errors, so correcting the repository access or path and rerunning is safe.
 | `generated-commit-sha` | Generated commit SHA, or empty for `no_changes`    |
 | `validation-verdict`   | Finding validation verdict (`VALID` or `INVALID`)  |
 | `validation-severity`  | Finding validation severity, when assigned         |
+
+Finding-count outputs are empty after asynchronous handoff, not zero. Read the
+server-owned check or the canonical run result for the eventual findings.
 
 ## Custom API environment
 

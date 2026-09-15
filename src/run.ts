@@ -6,6 +6,7 @@ import {
   createIdempotencyKey,
 } from "./api";
 import { getConfig } from "./config";
+import { isServerManagedGithubDelivery } from "./delivery";
 import {
   formatAiAuditorMarkdownPrComment,
   formatFindingValidationPrComment,
@@ -18,6 +19,7 @@ import { GitHubClient } from "./github";
 import type {
   ActionConfig,
   AiAuditorActionConfig,
+  AiAuditorGithubDeliveryRequest,
   AissRunReport,
   AuditFindings,
   Finding,
@@ -29,6 +31,7 @@ import type {
   Run,
   RunRequest,
   RunResult,
+  ServerManagedGithubDelivery,
   Severity,
   StandaloneActionConfig,
 } from "./types";
@@ -90,6 +93,8 @@ function initializeOutputs(): void {
   core.setOutput("generated-files", "");
   core.setOutput("generated-commit-sha", "");
   core.setOutput("issues-created", "");
+  core.setOutput("check-run-id", "");
+  core.setOutput("check-run-url", "");
   core.setOutput("highs-count", "0");
   core.setOutput("mediums-count", "0");
   core.setOutput("lows-count", "0");
@@ -112,6 +117,28 @@ function isFindingValidationConfig(
   config: ActionConfig,
 ): config is FindingValidationActionConfig {
   return config.workflow === "ai-auditor-finding-validation";
+}
+
+function isAsyncAuditConfig(config: ActionConfig): config is AiAuditorActionConfig {
+  return (
+    (config.workflow === "ai-auditor-full" || config.workflow === "ai-auditor-diff") &&
+    !config.waitForCompletion
+  );
+}
+
+function aiAuditorDelivery(
+  config: AiAuditorActionConfig,
+): AiAuditorGithubDeliveryRequest {
+  return {
+    type: "github_pull_request",
+    pull_request_number: config.prNumber,
+    head_commit_sha: config.headCommitSha,
+    comment_on_pr: config.commentOnPr,
+    create_issues: config.createIssues,
+    issue_severities: config.issueSeverities,
+    fail_on: config.failOn,
+    labels: config.labels,
+  };
 }
 
 function clientReference(
@@ -145,6 +172,7 @@ export function buildRunRequest(config: ActionConfig): RunRequest {
       instructions: config.instructions,
       skip_submodules: config.skipSubmodules,
       max_iterations: config.maxIterations,
+      ...(config.waitForCompletion ? {} : { delivery: aiAuditorDelivery(config) }),
       client_reference: reference,
     };
   }
@@ -165,6 +193,7 @@ export function buildRunRequest(config: ActionConfig): RunRequest {
       use_memory: config.useMemory,
       skip_submodules: config.skipSubmodules,
       max_iterations: config.maxIterations,
+      ...(config.waitForCompletion ? {} : { delivery: aiAuditorDelivery(config) }),
       client_reference: reference,
     };
   }
@@ -497,6 +526,37 @@ function validateRunIdentity(
   }
 }
 
+function validateAsyncDelivery(
+  run: Run,
+  config: AiAuditorActionConfig,
+): ServerManagedGithubDelivery {
+  const delivery = run.delivery;
+  if (
+    !isServerManagedGithubDelivery(delivery) ||
+    delivery.pull_request_number !== config.prNumber ||
+    delivery.check.head_sha !== config.headCommitSha ||
+    !new URL(delivery.check.html_url).pathname.toLowerCase().startsWith(
+      `${new URL(config.repositoryUrl).pathname.toLowerCase()}/`,
+    )
+  ) {
+    throw new Error(
+      `Certora accepted run ${run.id}, but did not confirm a server-owned Zeus AI Audit check for this pull request and head commit. The run has not been cancelled. Rerun with the same inputs and API key to recover it; do not change inputs to work around a missing handoff.`,
+    );
+  }
+  return delivery;
+}
+
+function publishAsyncHandoff(run: Run, config: AiAuditorActionConfig): void {
+  const delivery = validateAsyncDelivery(run, config);
+  core.setOutput("check-run-id", String(delivery.check.id));
+  core.setOutput("check-run-url", delivery.check.html_url);
+  core.info(`Server-owned ${delivery.check.name}: ${delivery.check.html_url}`);
+  core.info(`Audit dashboard: ${run.dashboard_url}`);
+  core.info(
+    "Audit handoff confirmed. This workflow confirms launch, not a clean audit; the separate Zeus AI Audit check owns the final result and fail-on policy. No runner-side cancellation or result publishing will follow.",
+  );
+}
+
 let activeRun: {
   api: AutoProverApi;
   runId: string;
@@ -665,6 +725,11 @@ async function tryGeneratedFollowup(
     followup.sourceCommitSha,
   );
   const delivery = response.run.delivery;
+  if (delivery && "managed_by" in delivery) {
+    throw new Error(
+      "Certora returned an audit check instead of generated-file delivery.",
+    );
+  }
   const completedForHead =
     delivery?.status === "succeeded" &&
     delivery.outcome === "committed" &&
@@ -986,6 +1051,14 @@ export async function run(): Promise<void> {
 
   core.info("Phase 1: Validating inputs...");
   const config = getConfig();
+  const asyncAudit = isAsyncAuditConfig(config);
+  if (asyncAudit) {
+    for (const output of [
+      "highs-count", "mediums-count", "lows-count", "infos-count",
+    ]) {
+      core.setOutput(output, "");
+    }
+  }
   const deadlineMs = Date.now() + config.timeout * 60_000;
   if (!Number.isSafeInteger(deadlineMs)) {
     throw new Error("The configured timeout is too large.");
@@ -1024,7 +1097,7 @@ export async function run(): Promise<void> {
   validateRunIdentity(currentRun, config, currentRunId);
   // Preserve the accepted run reference even if refreshing its status fails.
   core.setOutput("run-id", currentRunId);
-  activeRun = currentRun.cancellable
+  activeRun = !asyncAudit && currentRun.cancellable
     ? { api, runId: currentRunId, config }
     : null;
   if (config.githubRunAttempt > 1) {
@@ -1040,7 +1113,9 @@ export async function run(): Promise<void> {
 
   while (true) {
     validateRunIdentity(currentRun, config, currentRunId);
-    activeRun = { api, runId: currentRunId, config };
+    // An accepted async launch belongs to the server even if its handshake or
+    // a later refresh is malformed/unavailable. Never cancel it from a runner.
+    activeRun = asyncAudit ? null : { api, runId: currentRunId, config };
     core.setOutput("run-id", currentRunId);
     core.setOutput("status", currentRun.status);
     if (!isStandaloneConfig(config)) {
@@ -1049,16 +1124,23 @@ export async function run(): Promise<void> {
     core.info(`Run created or recovered: ${currentRunId}`);
     core.info(`Reserved balance: $${currentRun.billing.reserved_usd}.`);
 
-    core.info("Phase 4: Polling run...");
-    const terminal = await pollRun(
-      api,
-      currentRun,
-      currentRunId,
-      config,
-      config.pollInterval,
-      config.timeout,
-      deadlineMs,
+    if (isAsyncAuditConfig(config)) validateAsyncDelivery(currentRun, config);
+    core.info(
+      asyncAudit
+        ? "Phase 4: Confirming server check handoff..."
+        : "Phase 4: Polling run...",
     );
+    const terminal = asyncAudit
+      ? currentRun
+      : await pollRun(
+          api,
+          currentRun,
+          currentRunId,
+          config,
+          config.pollInterval,
+          config.timeout,
+          deadlineMs,
+        );
     activeRun = null;
     if (!terminal) return;
     currentRun = terminal;
@@ -1091,6 +1173,10 @@ export async function run(): Promise<void> {
       continue;
     }
 
+    if (isAsyncAuditConfig(config)) {
+      publishAsyncHandoff(currentRun, config);
+      return;
+    }
     break;
   }
 

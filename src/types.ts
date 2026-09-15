@@ -47,6 +47,43 @@ export type DiffSource = {
   authentication?: RepositoryAuthentication;
 };
 
+export type AiAuditorGithubDeliveryRequest = {
+  type: "github_pull_request";
+  pull_request_number: number;
+  head_commit_sha: string;
+  comment_on_pr: boolean;
+  create_issues: boolean;
+  issue_severities: Severity[];
+  fail_on: Severity[];
+  labels: string[];
+};
+
+export type ServerManagedGithubDelivery = {
+  type: "github_pull_request";
+  pull_request_number: number;
+  managed_by: "server";
+  status: "pending" | "in_progress" | "completed";
+  check: {
+    id: number;
+    name: "Zeus AI Audit";
+    head_sha: string;
+    html_url: string;
+    status: "in_progress" | "completed";
+  };
+  error?: string | null;
+};
+
+export type GeneratedFilesDelivery = {
+  type: "github_pull_request";
+  pull_request_number: number;
+  status: "pending" | "succeeded" | "failed" | "skipped";
+  outcome: "committed" | "no_changes" | null;
+  commit_sha: string | null;
+  files: { path: string }[];
+  renamed_files: { from: string; to: string }[];
+  error: string | null;
+};
+
 export type AiAuditorFullRunRequest = {
   source: SingleCommitSource;
   model_mode?: ModelMode;
@@ -56,6 +93,7 @@ export type AiAuditorFullRunRequest = {
   use_memory?: boolean;
   skip_submodules?: boolean;
   max_iterations?: number;
+  delivery?: AiAuditorGithubDeliveryRequest;
   client_reference?: string;
 };
 
@@ -66,6 +104,7 @@ export type AiAuditorDiffRunRequest = {
   instructions?: string;
   skip_submodules?: boolean;
   max_iterations?: number;
+  delivery?: AiAuditorGithubDeliveryRequest;
   client_reference?: string;
 };
 
@@ -146,16 +185,7 @@ export type Run = {
     charged_usd: string | null;
   };
   failure: (RunError & { retryable: boolean }) | null;
-  delivery: {
-    type: "github_pull_request";
-    pull_request_number: number;
-    status: "pending" | "succeeded" | "failed" | "skipped";
-    outcome: "committed" | "no_changes" | null;
-    commit_sha: string | null;
-    files: { path: string }[];
-    renamed_files: { from: string; to: string }[];
-    error: string | null;
-  } | null;
+  delivery: GeneratedFilesDelivery | ServerManagedGithubDelivery | null;
   cancellable: boolean;
   created_at: string;
   started_at: string | null;
@@ -331,6 +361,7 @@ type CommonActionConfig = {
 
 export type AiAuditorActionConfig = CommonActionConfig & {
   workflow: "ai-auditor-full" | "ai-auditor-diff";
+  waitForCompletion: boolean;
   modelMode?: ModelMode;
   context: string[];
   scope?: string[];

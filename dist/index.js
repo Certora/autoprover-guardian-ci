@@ -31998,6 +31998,7 @@ exports.getAutoProverApiErrorMessage = getAutoProverApiErrorMessage;
 exports.createIdempotencyKey = createIdempotencyKey;
 const node_crypto_1 = __nccwpck_require__(7598);
 const core = __importStar(__nccwpck_require__(7153));
+const delivery_1 = __nccwpck_require__(5327);
 const constants_1 = __nccwpck_require__(5851);
 class AutoProverApiError extends Error {
     code;
@@ -32182,6 +32183,26 @@ function isHttpUrl(value) {
         return false;
     }
 }
+function isRunDelivery(value) {
+    if (value === null || (0, delivery_1.isServerManagedGithubDelivery)(value))
+        return true;
+    return (isRecord(value) &&
+        !("managed_by" in value) &&
+        value.type === "github_pull_request" &&
+        Number.isSafeInteger(value.pull_request_number) &&
+        value.pull_request_number > 0 &&
+        typeof value.status === "string" &&
+        DELIVERY_STATUSES.has(value.status) &&
+        (value.outcome === null ||
+            (typeof value.outcome === "string" && DELIVERY_OUTCOMES.has(value.outcome))) &&
+        (value.commit_sha === null ||
+            (typeof value.commit_sha === "string" && constants_1.SHA_REGEX.test(value.commit_sha))) &&
+        Array.isArray(value.files) &&
+        value.files.every(isDeliveryFile) &&
+        Array.isArray(value.renamed_files) &&
+        value.renamed_files.every(isRenamedFile) &&
+        isNullableString(value.error));
+}
 function decodeRun(value) {
     const envelope = requestEnvelope(value);
     const run = envelope.run;
@@ -32214,24 +32235,7 @@ function decodeRun(value) {
                 typeof run.failure.code !== "string" ||
                 typeof run.failure.detail !== "string" ||
                 typeof run.failure.retryable !== "boolean")) ||
-        (run.delivery !== null &&
-            (!isRecord(run.delivery) ||
-                run.delivery.type !== "github_pull_request" ||
-                !Number.isSafeInteger(run.delivery.pull_request_number) ||
-                run.delivery.pull_request_number <= 0 ||
-                typeof run.delivery.status !== "string" ||
-                !DELIVERY_STATUSES.has(run.delivery.status) ||
-                (run.delivery.outcome !== null &&
-                    (typeof run.delivery.outcome !== "string" ||
-                        !DELIVERY_OUTCOMES.has(run.delivery.outcome))) ||
-                (run.delivery.commit_sha !== null &&
-                    (typeof run.delivery.commit_sha !== "string" ||
-                        !constants_1.SHA_REGEX.test(run.delivery.commit_sha))) ||
-                !Array.isArray(run.delivery.files) ||
-                !run.delivery.files.every(isDeliveryFile) ||
-                !Array.isArray(run.delivery.renamed_files) ||
-                !run.delivery.renamed_files.every(isRenamedFile) ||
-                !isNullableString(run.delivery.error))) ||
+        !isRunDelivery(run.delivery) ||
         typeof run.cancellable !== "boolean" ||
         typeof run.created_at !== "string" ||
         !isNullableString(run.started_at) ||
@@ -32262,7 +32266,12 @@ function decodeRun(value) {
         run.billing.status !== "settled") {
         invalidResponse("terminal run with unsettled billing");
     }
-    if (isRecord(run.delivery)) {
+    if ((0, delivery_1.isServerManagedGithubDelivery)(run.delivery) &&
+        run.run_type !== "ai_auditor_full" &&
+        run.run_type !== "ai_auditor_diff") {
+        invalidResponse("server-managed audit delivery on a different workflow");
+    }
+    if (isRecord(run.delivery) && !(0, delivery_1.isServerManagedGithubDelivery)(run.delivery)) {
         if ((run.delivery.status === "succeeded" &&
             (typeof run.delivery.outcome !== "string" ||
                 !DELIVERY_OUTCOMES.has(run.delivery.outcome))) ||
@@ -32801,6 +32810,12 @@ function getConfig() {
     }
     const repositoryPrivate = repositoryPrivateValue;
     const workflow = parseWorkflow(core.getInput("workflow"));
+    const waitForCompletion = parseBoolean(core.getInput("wait-for-completion"), "wait-for-completion", workflow !== "ai-auditor-full" && workflow !== "ai-auditor-diff");
+    if (!waitForCompletion &&
+        workflow !== "ai-auditor-full" &&
+        workflow !== "ai-auditor-diff") {
+        throw new Error("wait-for-completion: false is only supported by full/diff AI Auditor workflows.");
+    }
     const modelModeInput = core.getInput("model-mode");
     if (workflow === "auto-prover" || workflow === "auto-fuzzer") {
         if (modelModeInput.trim()) {
@@ -32905,6 +32920,7 @@ function getConfig() {
         scope: scope.length > 0 ? scope : undefined,
         instructions: parseOptionalApiText(core.getInput("instructions"), "instructions", constants_1.INSTRUCTIONS_MAX),
         useMemory: parseBoolean(core.getInput("use-memory"), "use-memory", true),
+        waitForCompletion,
         maxIterations,
         skipSubmodules: parseBoolean(core.getInput("skip-submodules"), "skip-submodules", false),
         createIssues: parseBoolean(core.getInput("create-issues"), "create-issues", true),
@@ -32969,6 +32985,54 @@ exports.PATTERN_MAX = 500;
 exports.PATTERN_ARRAY_MAX = 5_000;
 exports.INSTRUCTIONS_MAX = 10_000;
 exports.FINDING_MAX = 8_000;
+
+
+/***/ }),
+
+/***/ 5327:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.isServerManagedGithubDelivery = isServerManagedGithubDelivery;
+const constants_1 = __nccwpck_require__(5851);
+function isRecord(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+/** A persisted GitHub check, not merely an accepted audit or delivery request. */
+function isServerManagedGithubDelivery(value) {
+    if (!isRecord(value) || !isRecord(value.check))
+        return false;
+    const check = value.check;
+    if (value.type !== "github_pull_request" ||
+        value.managed_by !== "server" ||
+        !Number.isSafeInteger(value.pull_request_number) ||
+        value.pull_request_number <= 0 ||
+        !["pending", "in_progress", "completed"].includes(String(value.status)) ||
+        !Number.isSafeInteger(check.id) ||
+        check.id <= 0 ||
+        check.name !== "Zeus AI Audit" ||
+        typeof check.head_sha !== "string" ||
+        !constants_1.SHA_REGEX.test(check.head_sha) ||
+        !["in_progress", "completed"].includes(String(check.status)) ||
+        typeof check.html_url !== "string" ||
+        (value.error !== undefined &&
+            value.error !== null &&
+            typeof value.error !== "string")) {
+        return false;
+    }
+    try {
+        const url = new URL(check.html_url);
+        return (url.protocol === "https:" &&
+            url.hostname === "github.com" &&
+            !url.username &&
+            !url.password);
+    }
+    catch {
+        return false;
+    }
+}
 
 
 /***/ }),
@@ -33698,6 +33762,7 @@ const core = __importStar(__nccwpck_require__(7153));
 const automatic_context_1 = __nccwpck_require__(6891);
 const api_1 = __nccwpck_require__(7822);
 const config_1 = __nccwpck_require__(6878);
+const delivery_1 = __nccwpck_require__(5327);
 const format_1 = __nccwpck_require__(4923);
 const github_1 = __nccwpck_require__(4171);
 const types_1 = __nccwpck_require__(7715);
@@ -33744,6 +33809,8 @@ function initializeOutputs() {
     core.setOutput("generated-files", "");
     core.setOutput("generated-commit-sha", "");
     core.setOutput("issues-created", "");
+    core.setOutput("check-run-id", "");
+    core.setOutput("check-run-url", "");
     core.setOutput("highs-count", "0");
     core.setOutput("mediums-count", "0");
     core.setOutput("lows-count", "0");
@@ -33759,6 +33826,22 @@ function isStandaloneConfig(config) {
 }
 function isFindingValidationConfig(config) {
     return config.workflow === "ai-auditor-finding-validation";
+}
+function isAsyncAuditConfig(config) {
+    return ((config.workflow === "ai-auditor-full" || config.workflow === "ai-auditor-diff") &&
+        !config.waitForCompletion);
+}
+function aiAuditorDelivery(config) {
+    return {
+        type: "github_pull_request",
+        pull_request_number: config.prNumber,
+        head_commit_sha: config.headCommitSha,
+        comment_on_pr: config.commentOnPr,
+        create_issues: config.createIssues,
+        issue_severities: config.issueSeverities,
+        fail_on: config.failOn,
+        labels: config.labels,
+    };
 }
 function clientReference(config, sourceCommitSha = config.headCommitSha) {
     return [
@@ -33786,6 +33869,7 @@ function buildRunRequest(config) {
             instructions: config.instructions,
             skip_submodules: config.skipSubmodules,
             max_iterations: config.maxIterations,
+            ...(config.waitForCompletion ? {} : { delivery: aiAuditorDelivery(config) }),
             client_reference: reference,
         };
     }
@@ -33805,6 +33889,7 @@ function buildRunRequest(config) {
             use_memory: config.useMemory,
             skip_submodules: config.skipSubmodules,
             max_iterations: config.maxIterations,
+            ...(config.waitForCompletion ? {} : { delivery: aiAuditorDelivery(config) }),
             client_reference: reference,
         };
     }
@@ -34065,6 +34150,24 @@ function validateRunIdentity(run, config, expectedRunId, expectedSourceCommitSha
         throw new Error("Certora returned a run bound to a different pull request.");
     }
 }
+function validateAsyncDelivery(run, config) {
+    const delivery = run.delivery;
+    if (!(0, delivery_1.isServerManagedGithubDelivery)(delivery) ||
+        delivery.pull_request_number !== config.prNumber ||
+        delivery.check.head_sha !== config.headCommitSha ||
+        !new URL(delivery.check.html_url).pathname.toLowerCase().startsWith(`${new URL(config.repositoryUrl).pathname.toLowerCase()}/`)) {
+        throw new Error(`Certora accepted run ${run.id}, but did not confirm a server-owned Zeus AI Audit check for this pull request and head commit. The run has not been cancelled. Rerun with the same inputs and API key to recover it; do not change inputs to work around a missing handoff.`);
+    }
+    return delivery;
+}
+function publishAsyncHandoff(run, config) {
+    const delivery = validateAsyncDelivery(run, config);
+    core.setOutput("check-run-id", String(delivery.check.id));
+    core.setOutput("check-run-url", delivery.check.html_url);
+    core.info(`Server-owned ${delivery.check.name}: ${delivery.check.html_url}`);
+    core.info(`Audit dashboard: ${run.dashboard_url}`);
+    core.info("Audit handoff confirmed. This workflow confirms launch, not a clean audit; the separate Zeus AI Audit check owns the final result and fail-on policy. No runner-side cancellation or result publishing will follow.");
+}
 let activeRun = null;
 let shutdownHandlersRegistered = false;
 let shuttingDown = false;
@@ -34160,6 +34263,9 @@ async function tryGeneratedFollowup(config, api, ghClient, deadlineMs) {
     const response = await api.getRun(followup.runId);
     validateRunIdentity(response.run, config, followup.runId, followup.sourceCommitSha);
     const delivery = response.run.delivery;
+    if (delivery && "managed_by" in delivery) {
+        throw new Error("Certora returned an audit check instead of generated-file delivery.");
+    }
     const completedForHead = delivery?.status === "succeeded" &&
         delivery.outcome === "committed" &&
         delivery.commit_sha?.toLowerCase() === config.headCommitSha.toLowerCase();
@@ -34363,6 +34469,14 @@ async function run() {
     initializeOutputs();
     core.info("Phase 1: Validating inputs...");
     const config = (0, config_1.getConfig)();
+    const asyncAudit = isAsyncAuditConfig(config);
+    if (asyncAudit) {
+        for (const output of [
+            "highs-count", "mediums-count", "lows-count", "infos-count",
+        ]) {
+            core.setOutput(output, "");
+        }
+    }
     const deadlineMs = Date.now() + config.timeout * 60_000;
     if (!Number.isSafeInteger(deadlineMs)) {
         throw new Error("The configured timeout is too large.");
@@ -34391,7 +34505,7 @@ async function run() {
     validateRunIdentity(currentRun, config, currentRunId);
     // Preserve the accepted run reference even if refreshing its status fails.
     core.setOutput("run-id", currentRunId);
-    activeRun = currentRun.cancellable
+    activeRun = !asyncAudit && currentRun.cancellable
         ? { api, runId: currentRunId, config }
         : null;
     if (config.githubRunAttempt > 1) {
@@ -34405,7 +34519,9 @@ async function run() {
     let usedAttemptScopedRetry = false;
     while (true) {
         validateRunIdentity(currentRun, config, currentRunId);
-        activeRun = { api, runId: currentRunId, config };
+        // An accepted async launch belongs to the server even if its handshake or
+        // a later refresh is malformed/unavailable. Never cancel it from a runner.
+        activeRun = asyncAudit ? null : { api, runId: currentRunId, config };
         core.setOutput("run-id", currentRunId);
         core.setOutput("status", currentRun.status);
         if (!isStandaloneConfig(config)) {
@@ -34413,8 +34529,14 @@ async function run() {
         }
         core.info(`Run created or recovered: ${currentRunId}`);
         core.info(`Reserved balance: $${currentRun.billing.reserved_usd}.`);
-        core.info("Phase 4: Polling run...");
-        const terminal = await pollRun(api, currentRun, currentRunId, config, config.pollInterval, config.timeout, deadlineMs);
+        if (isAsyncAuditConfig(config))
+            validateAsyncDelivery(currentRun, config);
+        core.info(asyncAudit
+            ? "Phase 4: Confirming server check handoff..."
+            : "Phase 4: Polling run...");
+        const terminal = asyncAudit
+            ? currentRun
+            : await pollRun(api, currentRun, currentRunId, config, config.pollInterval, config.timeout, deadlineMs);
         activeRun = null;
         if (!terminal)
             return;
@@ -34436,6 +34558,10 @@ async function run() {
             currentRun = (await api.createRun(config.workflow, body, retryIdempotencyKey)).run;
             currentRunId = currentRun.id;
             continue;
+        }
+        if (isAsyncAuditConfig(config)) {
+            publishAsyncHandoff(currentRun, config);
+            return;
         }
         break;
     }

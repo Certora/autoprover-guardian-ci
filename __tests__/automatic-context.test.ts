@@ -235,6 +235,8 @@ describe("automatic context through the real Guardian request pipeline", () => {
       "comment-on-pr": "false",
       "create-issues": "false",
       "poll-interval": "1",
+      // Existing polling/cancellation regressions explicitly exercise legacy mode.
+      "wait-for-completion": "true",
       timeout: "1",
       "use-memory": "false",
       scope: SCOPE.join(", "),
@@ -242,6 +244,73 @@ describe("automatic context through the real Guardian request pipeline", () => {
       finding: FINDING,
     }))
       inputs.set(key, value);
+  });
+
+  describe.each(["ai-auditor-full", "ai-auditor-diff"] as const)("async default for %s", (workflow) => {
+    it.each(["success", "ambiguous network failure"])(
+      "hands off without polling after %s, preserving the canonical request on retry",
+      async (transport) => {
+        inputs.set("workflow", workflow);
+        inputs.delete("wait-for-completion");
+        if (transport !== "success") {
+          fetchMock.mockRejectedValueOnce(new TypeError("Connection closed after accepting launch"));
+        }
+        const delivery: NonNullable<Run["delivery"]> = {
+          type: "github_pull_request",
+          pull_request_number: 42,
+          managed_by: "server",
+          status: "pending",
+          check: {
+            id: 12345,
+            name: "Zeus AI Audit",
+            head_sha: "b".repeat(40),
+            html_url: `${REPOSITORY_URL}/runs/12345`,
+            status: "in_progress",
+          },
+        };
+        fetchMock.mockResolvedValueOnce(runResponse(workflow, "queued", { delivery }));
+
+        const pending = run();
+        if (transport !== "success") await vi.advanceTimersByTimeAsync(1_000);
+        await pending;
+
+        const calls = launchCalls(workflow);
+        expect(fetchMock).toHaveBeenCalledTimes(transport === "success" ? 1 : 2);
+        for (const [, options] of calls) {
+          expect(JSON.parse(String(options?.body))).toEqual({
+            ...expectedBody(workflow),
+            delivery: {
+              type: "github_pull_request",
+              pull_request_number: 42,
+              head_commit_sha: "b".repeat(40),
+              comment_on_pr: false,
+              create_issues: false,
+              issue_severities: ["HIGH", "MEDIUM"],
+              fail_on: [],
+              labels: ["ai-auditor", "security"],
+            },
+          });
+          expect(options?.body).toBe(calls[0]?.[1]?.body);
+          expect(options?.headers).toEqual(calls[0]?.[1]?.headers);
+          expect(JSON.stringify(options)).not.toContain("ghs_local_test_only");
+        }
+        expect(setOutput).toHaveBeenCalledWith("run-id", RUN_ID);
+        expect(setOutput).toHaveBeenCalledWith("check-run-url", `${REPOSITORY_URL}/runs/12345`);
+        expect(setOutput).toHaveBeenCalledWith("status", "queued");
+        expect(setFailed).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
+
+    it("fails closed against a legacy server without cancelling the accepted audit", async () => {
+      inputs.set("workflow", workflow);
+      inputs.delete("wait-for-completion");
+      fetchMock.mockResolvedValueOnce(runResponse(workflow, "queued"));
+      await expect(run()).rejects.toThrow("did not confirm a server-owned Zeus AI Audit check");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(setOutput).toHaveBeenCalledWith("run-id", RUN_ID);
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 
   afterEach(() => {
