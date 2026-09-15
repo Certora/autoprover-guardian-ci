@@ -54,7 +54,7 @@ inputs:
     default: "true"
 
   max-iterations:
-    description: "AI Auditor only: DeepDive iterations (4-10)"
+    description: "Full/diff AI Auditor only: DeepDive iterations (2-10), independent of model-mode"
     required: false
     default: "6"
 

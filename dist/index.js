@@ -32888,9 +32888,9 @@ function getConfig() {
     }
     const maxIterations = Number(core.getInput("max-iterations") || String(constants_1.DEFAULT_MAX_ITERATIONS));
     if (!Number.isSafeInteger(maxIterations) ||
-        maxIterations < 4 ||
+        maxIterations < 2 ||
         maxIterations > 10) {
-        throw new Error("max-iterations must be between 4 and 10.");
+        throw new Error("max-iterations must be between 2 and 10.");
     }
     const scopeInput = core.getInput("scope") || "";
     const scope = parseApiPatternList(scopeInput, "scope");

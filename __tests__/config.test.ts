@@ -204,10 +204,23 @@ describe("getConfig v2", () => {
       },
     );
 
-    it.each([4, 10])("preserves an explicit %i iteration override", (iterations) => {
-      inputs.set("model-mode", mode);
-      inputs.set("max-iterations", String(iterations));
-      expect(getConfig()).toMatchObject({ modelMode: mode, maxIterations: iterations });
+    describe.each(["ai-auditor-full", "ai-auditor-diff"])("%s", (workflow) => {
+      it.each([2, 3, 4, 6, 10])("preserves an explicit %i iteration override", (iterations) => {
+        inputs.set("workflow", workflow);
+        inputs.set("model-mode", mode);
+        inputs.set("max-iterations", String(iterations));
+        expect(getConfig()).toMatchObject({ modelMode: mode, maxIterations: iterations });
+      });
+
+      it.each(["-1", "0", "1", "11", "2.5", "NaN", "Infinity"])(
+        "rejects iteration input %j outside the whole-number range 2-10",
+        (iterations) => {
+          inputs.set("workflow", workflow);
+          inputs.set("model-mode", mode);
+          inputs.set("max-iterations", iterations);
+          expect(() => getConfig()).toThrow("max-iterations must be between 2 and 10.");
+        },
+      );
     });
 
     it("supports finding validation without adding DeepDive iterations", () => {

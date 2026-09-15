@@ -93,7 +93,7 @@ Only AutoProver and AutoFuzzer require Solidity contracts.
 is the server default; Frontier uses the frontier model set throughout the
 auditor pipeline, with the configured Luna helper unchanged. Both modes use
 six DeepDive iterations by default. Model selection and iteration count are
-independent: the action/API still accepts `max-iterations` from 4 through 10.
+independent: the action/API accepts `max-iterations` from 2 through 10.
 Finding validation supports both model modes but has no DeepDive iterations.
 
 Leave `model-mode` empty to use Normal without changing existing launch bodies
@@ -305,7 +305,7 @@ errors, so correcting the repository access or path and rerunning is safe.
 | `scope`             | Full auto context  | —                         | Full-run audit paths; optional subset with explicit context |
 | `instructions`      | No                 | —                         | Custom AI Auditor instructions, up to 10,000 chars     |
 | `use-memory`        | No                 | `true`                    | Use repository memory for full runs                    |
-| `max-iterations`    | No                 | `6`                       | AI Auditor iterations, from 4 through 10               |
+| `max-iterations`    | No                 | `6`                       | Full/diff AI Auditor iterations, from 2 through 10     |
 | `skip-submodules`   | No                 | `false`                   | Skip repository submodules                             |
 | `github-token`      | No                 | `${{ github.token }}`     | Local GitHub operations only; never sent to Certora    |
 | `api-base-url`      | No                 | `https://app.certora.com` | Certora API base URL                                   |

@@ -16,12 +16,13 @@ describe("published v2 documentation", () => {
     const normalizedReadme = readme.replace(/\s+/g, " ");
     expect(normalizedReadme).toContain("`model-mode` selects the AI Auditor model set: `normal` or `frontier`");
     expect(normalizedReadme).toContain("six DeepDive iterations by default");
-    expect(normalizedReadme).toContain("still accepts `max-iterations` from 4 through 10");
+    expect(normalizedReadme).toContain("accepts `max-iterations` from 2 through 10");
     expect(normalizedReadme).toContain("Finding validation supports both model modes but has no DeepDive iterations");
     expect(normalizedReadme).toContain("Not recorded (legacy run)");
     const modeInput = action.split("  model-mode:")[1]?.split("\n\n")[0] ?? "";
     expect(modeInput).toContain('default: ""');
     const iterationInput = action.split("  max-iterations:")[1]?.split("\n\n")[0] ?? "";
+    expect(iterationInput).toContain("DeepDive iterations (2-10)");
     expect(iterationInput).toContain('default: "6"');
   });
 

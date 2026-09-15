@@ -250,6 +250,48 @@ describe("automatic context through the real Guardian request pipeline", () => {
     vi.unstubAllGlobals();
   });
 
+  describe.each(["normal", "frontier"] as const)("DeepDive iterations in %s mode", (modelMode) => {
+    describe.each(["ai-auditor-full", "ai-auditor-diff"] as const)("%s", (workflow) => {
+      it.each(["2", "3", "10", ""])(
+        "forwards iteration input %j without clamping and defaults empty input to six",
+        async (iterations) => {
+          inputs.set("workflow", workflow);
+          inputs.set("model-mode", modelMode);
+          inputs.set("max-iterations", iterations);
+          fetchMock
+            .mockResolvedValueOnce(runResponse(workflow, "succeeded", { model_mode: modelMode }))
+            .mockResolvedValueOnce(resultResponse(workflow));
+
+          await run();
+
+          const calls = launchCalls(workflow);
+          expect(calls).toHaveLength(1);
+          expect(JSON.parse(String(calls[0]?.[1]?.body))).toEqual({
+            ...expectedBody(workflow),
+            model_mode: modelMode,
+            max_iterations: iterations === "" ? 6 : Number(iterations),
+          });
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+          expect(setOutput).toHaveBeenCalledWith("model-mode", modelMode);
+          expect(setFailed).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each(["1", "11", "2.5"])(
+        "rejects invalid iteration input %j before any API call",
+        async (iterations) => {
+          inputs.set("workflow", workflow);
+          inputs.set("model-mode", modelMode);
+          inputs.set("max-iterations", iterations);
+
+          await expect(run()).rejects.toThrow("max-iterations must be between 2 and 10.");
+
+          expect(fetchMock).not.toHaveBeenCalled();
+        },
+      );
+    });
+  });
+
   describe.each(WORKFLOWS)("%s", (workflow) => {
     beforeEach(() => inputs.set("workflow", workflow));
 
