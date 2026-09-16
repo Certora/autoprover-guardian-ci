@@ -1,287 +1,478 @@
-# Zeus Guardian CI
+# AutoProver Guardian CI
 
-A GitHub Action that runs [Zeus](https://zeus.certora.com) security audits on pull request changes and automatically creates GitHub issues for each finding.
+AutoProver Guardian CI runs one Certora workflow for every pull request:
 
-## How It Works
+- `ai-auditor-full`
+- `ai-auditor-diff` (default)
+- `ai-auditor-finding-validation`
+- `auto-prover`
+- `auto-fuzzer`
 
-1. When a PR is opened or updated, the action sends it to Zeus for analysis
-2. **Diff audit** (default): analyzes only the changed files between base and head commits
-3. **Full audit**: scans the entire codebase at the PR's head commit
-4. The action polls for completion and logs progress in real-time
-5. Once done, it creates GitHub issues for findings (configurable: HIGH, MEDIUM, LOW, INFO)
-6. A summary comment is always posted on the PR — even when no findings are detected, so you know Zeus ran
+The action uses the public `/v2` run API. All workflows are submitted directly,
+without a separate estimate or preview. Launches use a deterministic
+`Idempotency-Key`: the server recovers an existing run before billing checks,
+and validates source, calculates pricing, and reserves balance for new runs.
+The public API still supports optional estimates and the AISS
+`Estimate-Quote-Id` header for other callers; Guardian does not need either.
+Full/diff AI Auditor runs use an asynchronous handoff by default: the Action
+finishes successfully after the server confirms a persisted **Security Review**
+check on the pull request head. That separate check stays pending while the
+audit runs and receives the terminal outcome. Other workflows, and full/diff
+runs with `wait-for-completion: true`, poll the canonical run resource until
+completion. There is no separate progress endpoint.
 
-## Quick Start
+## Quick start
 
-### Step 1: Get a Zeus API Key
+Create an organization API key with the required run scopes in the Certora
+dashboard, then save it as a repository secret named `CERTORA_API_KEY`.
+Guardian needs `runs:create` and `runs:read`; grant `runs:cancel` for timeout
+cancellation and `generated_files:write` for AutoProver or AutoFuzzer delivery.
+For asynchronous full/diff audits, connect the organization's GitHub App with
+repository access, **Checks: write**, and pull-request read access. Approve
+**Pull requests: write** for PR summaries and **Issues: write** for finding issues
+when those publishing options are enabled. Existing installations must approve
+newly requested permissions. The server uses the App's credentials, never the
+Action's `github-token`, to finish delivery.
 
-1. Sign up at [zeus.certora.com](https://zeus.certora.com)
-2. Navigate to **API** in your organization sidebar
-3. Click **Generate Key** and copy the key
+Omit `context` or leave it empty to let the server select context during launch.
+No preview or preparation token is required. Full audits require `scope` when
+context is automatic; diff audits use the complete immutable pull-request diff
+as their audit scope. Finding validation selects context for the submitted
+finding. Guardian never replaces empty context with every repository file or
+a locally generated list of changed files. The server checks balance and
+reserves the required amount before starting the audit.
 
-### Step 2: Add the Secret to Your Repository
+An explicit `context` remains an override: select JSON arrays or comma-separated globs that
+include the audited code and relevant dependencies. For full audits, an optional
+`scope` focuses on a subset of that context; without it, the explicit context
+is the scope. For diff audits, explicit context also filters the diff, so keep
+the changed paths you want audited in that selection. AutoProver and AutoFuzzer
+do not use this input.
 
-1. Go to your repo on GitHub
-2. Navigate to **Settings > Secrets and variables > Actions**
-3. Click **New repository secret**
-4. Name: `ZEUS_API_KEY`
-5. Value: your Zeus API key (starts with `zeus_live_`)
-
-### Step 3: Create the Workflow File
-
-Create `.github/workflows/zeus-audit.yml` in your repository:
+AI Auditor loads direct submodules only, never nested submodules. Set
+`skip-submodules: true` to skip all submodules. Include required libraries in
+the repository or a direct submodule when they would otherwise be nested.
 
 ```yaml
-name: Zeus Security Audit
+name: Certora security
+
 on:
   pull_request:
-    branches: [main, dev]
+    branches: [main]
 
 permissions:
+  contents: read
   issues: write
   pull-requests: write
-  contents: read
 
 jobs:
-  zeus-audit:
+  certora:
     runs-on: ubuntu-latest
     steps:
-      - uses: Certora/zeus-guardian-ci@v1
+      - uses: Certora/autoprover-guardian-ci@v2
         with:
-          api-key: ${{ secrets.ZEUS_API_KEY }}
-          context: "contracts/**/*.sol"
+          api-key: ${{ secrets.CERTORA_API_KEY }}
+          workflow: ai-auditor-diff
 ```
 
-That's it. Every PR will now be audited automatically.
+The API key is sent as a Bearer token only to the configured Certora API base
+URL. `github-token` remains inside the action and is used only for GitHub issue,
+comment, PR/branch verification, and commit-follow-up operations. It is never sent to Certora. Diff reviews
+need `contents: read` and `pull-requests: read` for those live checks, even when
+server-side reporting is used.
 
-## One-Click Install from Dashboard
+## Asynchronous audit checks
 
-Prefer a visual setup? You can install Zeus Guardian CI directly from the Zeus dashboard — no manual file creation needed.
+For full/diff AI Auditor, `wait-for-completion` defaults to `false`. The server
+persists the PR number, immutable head SHA, and `comment-on-pr`, `create-issues`,
+`issue-severities`, `fail-on`, and `labels` settings at launch. Before the Action
+can exit green, the server must acknowledge an actual **Security Review** check
+ID bound to that PR and commit. An absent or mismatched acknowledgement fails
+the Action; a launch response alone is not sufficient. The accepted audit is
+not cancelled on handshake/transport errors; recover it with the same inputs
+and API key.
 
-1. Go to your organization on [zeus.certora.com](https://zeus.certora.com)
-2. Click **GitHub Action** in the sidebar
-3. Connect your GitHub account
-4. Select the repository you want to protect
-5. Choose which branches to audit (e.g., `main`, `dev`, `staging`)
-6. Configure your settings (context patterns, severities, fail conditions)
-7. Click **Create Pull Request**
+Asynchronous AI Auditor delivery currently supports **same-repository pull
+requests only**. Both the PR base and head must belong to the audited repository.
+The server rejects fork PRs during preflight, before reserving balance or
+starting paid audit work. This restriction applies to asynchronous full/diff
+delivery, independently of the separate AutoProver/AutoFuzzer fork restrictions.
 
-Zeus will automatically open a PR on your repository with the workflow file configured exactly as you specified. Just merge the PR, then add your `ZEUS_API_KEY` secret in **Settings > Secrets and variables > Actions**.
+The persisted **Security Review** check is owned by the organization's installed
+GitHub App. Approve the App permissions above on the installation; workflow
+`permissions` only configure the runner's `GITHUB_TOKEN` and do not grant App
+permissions. The server mints fresh installation tokens for final reporting and
+never persists the runner's temporary token.
 
-## Private Repositories
+The launch job's green result means **handoff succeeded**, not "no findings".
+Use **Security Review** as the required audit check in branch protection. The
+server keeps it pending until the audit is terminal, applies `fail-on`, and
+publishes the configured PR summary/issues. `check-run-id` and `check-run-url`
+identify that check; finding-count outputs are empty because this runner has
+not waited for results. Failed audits and findings matching `fail-on` are
+reported by the separate check, not by a runner that already finished.
 
-The default `GITHUB_TOKEN` may not have sufficient permissions for Zeus to clone private repositories. In that case, create a **Personal Access Token (PAT)** with `contents: read` scope and pass it:
+Upgrade pinned Action versions before deploying a server that publishes the
+renamed check: older Action versions require the previous name. This version
+accepts the current and legacy names for compatibility with older servers and existing runs.
+Once the server publishes **Security Review**, update branch-protection rules that
+still require the previous check name. The Action does not rename existing
+checks or change branch-protection settings.
+
+For diff reviews, the Action verifies the current open, same-repository PR and
+resolves the latest target-branch tip and PR-branch tip through GitHub before
+launch. Both are pinned as exact commit SHAs for that invocation; no synthetic
+merge commit or merge-base is used. If the PR head no longer matches the workflow
+event, or the PR was closed, retargeted, or cannot be verified, the Action stops
+before launching an audit. Use the workflow for the current head, not a stale
+event rerun. Full reviews and AutoProver/AutoFuzzer keep their existing sources.
+
+The diff launch key stays bound to the original workflow event. If the target
+branch advances between reruns, the server rejects the changed request with
+`idempotency_conflict` rather than charging for a second audit. The accepted run
+is not cancelled: inspect the original run in the dashboard. Rerunning with the
+same inputs cannot resolve that branch drift; deliberately trigger a new GitHub
+workflow only when a new audit is wanted. Never change the key to bypass this
+protection.
+
+The server's audit deadline is up to **96 hours**. This does not require a
+96-hour GitHub runner: the Action only waits for launch and check handoff.
+After successful handoff, ending or cancelling the GitHub workflow does not
+cancel the audit. Use the Certora dashboard or the run cancellation API.
+
+Set `wait-for-completion: true` to retain synchronous polling and local result,
+comment, issue, and `fail-on` handling. Its `timeout` still defaults to 120
+minutes; GitHub's runner/job limits also apply, and increasing this input does
+not override them. Finding validation, AutoProver, and AutoFuzzer remain
+synchronous; explicitly setting `wait-for-completion: false` for those workflows
+is rejected.
+
+Deploy a server supporting this handoff before enabling asynchronous runs.
+When recovering a run launched by the legacy synchronous Action, explicitly
+set `wait-for-completion: true` to preserve its launch body and idempotency key.
+Changing delivery mode/settings changes the launch identity; do not switch
+modes merely to recover an ambiguous or still-running launch.
+
+## Repository access
+
+Public repositories are launched with `source.authentication.type: public`.
+Private repositories use `organization_github_app`; connect the Certora GitHub
+App to the organization and grant it access to the repository first.
+
+AutoProver and AutoFuzzer also require the organization GitHub App to write
+generated files. Guardian binds the pull request number at launch and calls the
+empty-body `/v2/runs/{run_id}/generated-files/commit` endpoint only after the
+run succeeds. Fork pull requests are rejected for these two workflows.
+
+## Workflow examples
+
+AI Auditor supports any programming language for full, diff, and finding-validation
+runs. Explicit context may mix source languages, shared libraries, resources, and relevant
+build manifests (for example `src/**/*.py,web/**/*.ts,lib/**,pyproject.toml`).
+Only AutoProver and AutoFuzzer require Solidity contracts.
+
+### AI Auditor model modes
+
+`model-mode` selects the AI Auditor model set: `normal` or `frontier`. Normal
+is the server default; Frontier uses the frontier model set throughout the
+auditor pipeline, with the configured Luna helper unchanged. Both modes use
+six DeepDive iterations by default. Model selection and iteration count are
+independent: the action/API accepts `max-iterations` from 2 through 10.
+Finding validation supports both model modes but has no DeepDive iterations.
+
+Leave `model-mode` empty to use Normal without changing existing launch bodies
+or idempotency keys. An explicit selection is forwarded as `model_mode` in
+every launch and retry. Guardian
+never retries by removing or downgrading the requested mode. AutoProver and
+AutoFuzzer reject this AI Auditor-only input.
+
+Startup logs show the requested/default mode. PR summaries show the recorded
+mode, or an explicitly requested mode when the server does not report one.
+Historical runs with neither are labeled "Not recorded (legacy run)", not
+retroactively Normal. Frontier summaries use a separate comment marker, so
+Normal and Frontier jobs for the same workflow can coexist in a matrix.
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/autoprover-guardian-ci@v2
   with:
-    api-key: ${{ secrets.ZEUS_API_KEY }}
-    context: "contracts/**/*.sol"
-    github-token: ${{ secrets.PAT_TOKEN }}
+    api-key: ${{ secrets.CERTORA_API_KEY }}
+    workflow: ai-auditor-diff
+    model-mode: frontier
+    max-iterations: "6"
 ```
 
-## Examples
-
-### Multiple Target Branches
-
-Audit PRs targeting any of your main branches:
+### Full AI Auditor run
 
 ```yaml
-on:
-  pull_request:
-    branches: [main, dev, staging]
-```
-
-### Full Audit (Entire Codebase)
-
-By default, the action runs a diff audit (changed files only). Set `audit-type: "full"` to scan the entire codebase at the PR head commit:
-
-```yaml
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/autoprover-guardian-ci@v2
   with:
-    api-key: ${{ secrets.ZEUS_API_KEY }}
-    context: "contracts/**/*.sol"
-    audit-type: "full"
-```
-
-Full audits use repo memory by default, matching the dashboard: accepted
-assumptions from previous audits are sent as context so Zeus does not re-report
-them. Disable it with `use-memory: "false"`:
-
-```yaml
-- uses: Certora/zeus-guardian-ci@v1
-  with:
-    api-key: ${{ secrets.ZEUS_API_KEY }}
-    context: "contracts/**/*.sol"
-    audit-type: "full"
-    use-memory: "false"
-```
-
-You can optionally narrow the focus with `scope`:
-
-```yaml
-- uses: Certora/zeus-guardian-ci@v1
-  with:
-    api-key: ${{ secrets.ZEUS_API_KEY }}
-    context: "contracts/**/*.sol"
-    audit-type: "full"
+    api-key: ${{ secrets.CERTORA_API_KEY }}
+    workflow: ai-auditor-full
     scope: "contracts/src/**/*.sol"
+    instructions: "Focus on authorization and accounting invariants."
+    use-memory: "true"
 ```
 
-### Fail on HIGH Severity Findings
+### Diff AI Auditor run
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/autoprover-guardian-ci@v2
   with:
-    api-key: ${{ secrets.ZEUS_API_KEY }}
-    context: "contracts/**/*.sol"
-    fail-on: "HIGH"
-```
-
-### Choose Which Severities Create Issues
-
-By default, only HIGH and MEDIUM findings create GitHub issues. Use `issue-severities` to control this — any combination of `HIGH`, `MEDIUM`, `LOW`, `INFO`:
-
-```yaml
-# Create issues for everything except INFO
-- uses: Certora/zeus-guardian-ci@v1
-  with:
-    api-key: ${{ secrets.ZEUS_API_KEY }}
-    context: "src/**/*.sol,lib/**/*.sol"
-    issue-severities: "HIGH,MEDIUM,LOW"
+    api-key: ${{ secrets.CERTORA_API_KEY }}
+    workflow: ai-auditor-diff
     fail-on: "HIGH,MEDIUM"
 ```
 
+### AI Auditor finding validation
+
 ```yaml
-# Only create issues for HIGH findings
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/autoprover-guardian-ci@v2
   with:
-    api-key: ${{ secrets.ZEUS_API_KEY }}
-    context: "contracts/**/*.sol"
-    issue-severities: "HIGH"
+    api-key: ${{ secrets.CERTORA_API_KEY }}
+    workflow: ai-auditor-finding-validation
+    finding: "Vault.withdraw() may allow reentrancy before balances are updated."
 ```
 
+Finding validation audits the pull request head commit. It posts the verdict to
+the pull request and exposes `validation-verdict` (`VALID` or `INVALID`) and
+`validation-severity`. A `VALID` verdict means the submitted finding is valid;
+the action reports it but does not apply a built-in failure policy. Use the
+output in a later workflow step when repository policy should fail on it.
+
+### Explicit context override
+
 ```yaml
-# Create issues for all severities
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/autoprover-guardian-ci@v2
   with:
-    api-key: ${{ secrets.ZEUS_API_KEY }}
-    context: "contracts/**/*.sol"
-    issue-severities: "HIGH,MEDIUM,LOW,INFO"
+    api-key: ${{ secrets.CERTORA_API_KEY }}
+    workflow: ai-auditor-full
+    scope: "src/**/*.py"
+    context: "src/**/*.py,lib/**/*.py"
 ```
 
-### Maximum DeepDive Iterations
+This override is sent to the server during launch; it does not invoke
+automatic context selection.
+
+Both `context` and `scope` accept JSON string arrays. Prefer JSON for literal
+comma filenames or complex globs; the SaaS installer emits it automatically
+when needed:
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v1
+context: '["contracts/Exchange,old.sol","src/**/*.{ts,tsx}","!src/tests/**"]'
+scope: '["contracts/Exchange,old.sol"]'
+```
+
+Legacy CSV remains supported, including commas inside brace globs, character
+classes, and extglobs. Leading/trailing pattern whitespace is normalized, as in
+the public API. JSON arrays must contain non-empty strings; malformed JSON
+arrays are rejected rather than silently changing the audit selection.
+
+### AutoProver
+
+```yaml
+- uses: Certora/autoprover-guardian-ci@v2
   with:
-    api-key: ${{ secrets.ZEUS_API_KEY }}
-    context: "contracts/**/*.sol"
-    max-iterations: "10"
-    timeout: "180"
+    api-key: ${{ secrets.CERTORA_API_KEY }}
+    workflow: auto-prover
+    contract-path: src/Vault.sol
+    contract-name: Vault
+    design-doc-path: docs/vault-design.md
+    threat-model-path: docs/vault-threat-model.md
 ```
 
-### Disable Issue Creation (PR Comment Only)
+### AutoFuzzer
 
 ```yaml
-- uses: Certora/zeus-guardian-ci@v1
+- uses: Certora/autoprover-guardian-ci@v2
   with:
-    api-key: ${{ secrets.ZEUS_API_KEY }}
-    context: "contracts/**/*.sol"
-    create-issues: "false"
+    api-key: ${{ secrets.CERTORA_API_KEY }}
+    workflow: auto-fuzzer
+    contract-path: src/Vault.sol
+    contract-name: Vault
+    design-doc-path: docs/vault-design.md
 ```
 
-### Use Outputs in Subsequent Steps
+`threat-model-path` is supported only by AutoProver.
 
-```yaml
-steps:
-  - uses: Certora/zeus-guardian-ci@v1
-    id: audit
-    with:
-      api-key: ${{ secrets.ZEUS_API_KEY }}
-      context: "contracts/**/*.sol"
+## Independent configurations
 
-  - run: |
-      echo "Job ID: ${{ steps.audit.outputs.job-id }}"
-      echo "Status: ${{ steps.audit.outputs.status }}"
-      echo "High findings: ${{ steps.audit.outputs.highs-count }}"
-      echo "Issues created: ${{ steps.audit.outputs.issues-created }}"
+Multiple workflow files can run AI Auditor, AutoProver for several contracts,
+and AutoFuzzer on the same PR. Give each installation a distinct, stable
+`configuration-id` (up to 120 lowercase letters, digits, or hyphens, starting
+with a letter or digit). Different settings for the same contract also need
+different IDs. The ID scopes launch/recovery identity; it does not change the
+selected engine or contract. Omitted IDs preserve legacy request identity and
+are never treated as a match for a named configuration.
+
+Use distinct workflow/job names and concurrency groups. For AutoProver and
+AutoFuzzer, include both the configuration and PR head SHA in the concurrency
+group: a sibling's generated push must not cancel the original paid run.
+For example, `guardian-vault-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}`.
+
+Parallel generated deliveries append to a verified chain from the original
+source. The server verifies each sibling's complete additions-only output,
+preserves existing files using collision-safe filenames, and atomically checks
+the branch head before committing. Contributor changes, modified files,
+unverified trailers, and chains longer than 16 commits fail closed. Independent
+installations are not capped, but automatic delivery is limited to 16 generated
+artifact commits from the same audited source; additional artifacts remain
+available in the dashboard. A busy
+branch may require retrying delivery for the original run; do not launch a new
+paid run just to retry generated-file delivery.
+
+## Generated-commit follow-up
+
+Generated commits end with this exact trailer:
+
+```text
+Certora-Guardian-Run: <UUID>
 ```
 
-### Custom API URL (Staging / Self-hosted)
+When GitHub runs Guardian again for that commit, the action validates the
+generated ancestry against canonical runs and their exact delivery commits.
+It recovers only its own configuration, engine, and contract, even when a
+sibling's generated commit is above it. When this configuration has no generated
+commit, a bounded read-only lookup can recover its unique completed no-files
+result, including a failing outcome. A unique still-running original run is
+polled read-only within this invocation's timeout; the follow-up never launches
+or cancels that run. Missing, ambiguous, unverified, or timed-out results fail
+closed: no passing result is claimed and no new paid run is launched. Inspect
+the original run and retry the follow-up after it finishes if needed. If the generated commit was pushed before its delivery
+status could be saved, the follow-up recovers delivery for that same run without
+starting a second paid run. Text that does not match this exact trailer is ignored.
 
-If you're using a different Zeus environment (e.g., staging):
+If a successful run has no commit-worthy generated files, the delivery status
+is `no_changes`; `generated-commit-sha` remains empty and no follow-up is
+expected.
 
-```yaml
-- uses: Certora/zeus-guardian-ci@v1
-  with:
-    api-key: ${{ secrets.ZEUS_API_KEY }}
-    context: "contracts/**/*.sol"
-    api-base-url: "https://dev.zeus.certora.com"
-```
+## Reliability and cancellation
 
-> When installing via the Zeus dashboard, the correct `api-base-url` is set automatically based on the environment you're on.
+A stable idempotency key is
+derived from the GitHub workflow run and job, selected workflow, and canonical
+launch body, so transient timeouts, action process restarts, and GitHub rerun
+attempts first recover the same launch while the server retains the idempotency
+record. Guardian refreshes the canonical run on a GitHub rerun, since replayed
+launch responses can still contain their original queued status. A recovered queued or running run is
+handed off asynchronously or polled synchronously, and a recovered successful run is reused, without a second launch. Only
+when a GitHub rerun finds that canonical run already `failed` or `cancelled`
+does Guardian launch one retry with a key scoped to that GitHub run attempt.
+That retry key is stable for restarts within the attempt. A new workflow run or
+changed launch input also produces a different key.
+
+Accepted, reservation-backed, and unresolved API launch records no longer
+expire merely with age. Recovery uses the same organization, API key, endpoint,
+idempotency key, and body; changing API keys or deleting the owning organization
+does not preserve that scope. Only definite pre-dispatch `4xx` failures without
+a run or reservation can expire after 24 hours. Records removed before this
+retention fix cannot be restored automatically. A recovered run needs no new
+estimate or balance reservation; new launches still enforce all server checks.
+
+`timeout` is a shared budget for API launch/recovery and check handoff, or for
+polling and result/file delivery in synchronous mode. It does not change the
+server's audit deadline. Retriable launches keep the same key until that deadline, including
+when a request times out before the server finishes. `Retry-After` is respected
+even for long quota resets; if the wait cannot fit, Guardian stops with recovery
+guidance instead of retrying early. Cancellation gets up to 15 seconds of grace;
+a run that succeeds during cancellation gets a bounded 15-second completion
+grace to fetch its report and deliver files. Neither grace can launch an audit.
+
+In synchronous mode Guardian polls `GET /v2/runs/{run_id}`. Progress is displayed from the run's
+embedded `progress` object. On timeout or five consecutive polling failures it
+requests cancellation when the server marks the run cancellable. Canonical
+statuses are `queued`, `running`, `finalizing`, `succeeded`, `failed`,
+`cancelling`, and `cancelled`. A succeeded run guarantees that its result is
+ready and billing is settled. A quota reset beyond the remaining budget stops
+polling without issuing an early cancellation request; the run ID remains
+available for recovery.
+
+Automatic context preparation appears as "Planning context". Terminal AutoContext
+failures display their code and detail: `auto_context_budget_exhausted`,
+`auto_context_timeout`, `auto_context_invalid_plan`, `auto_context_provider_error`,
+or `auto_context_configuration_error`. Review the scope or explicit context for
+budget/plan failures, and ask an administrator to fix configuration failures.
+Guardian does not automatically relaunch a run that fails during polling; explicitly
+rerun the GitHub workflow to request another attempt under the recovery rules above.
+
+For direct AI Auditor runs, successful and cancelled runs include actual AutoContext
+usage in the standard bill; failed runs receive a full refund. The server's default $5
+AutoContext provider-spend cap is not a flat customer fee or a client-configurable
+budget. No separate preview is required.
+
+For synchronous delivery, PR summaries are scoped to workflow, model mode, immutable PR head, and canonical
+audit run. Guardian updates only comments that GitHub confirms were authored by
+the authenticated token identity. It skips publication for an outdated head,
+and a late older audit cannot overwrite a newer audit's summary. Legacy unscoped
+comments are left intact; the first run after upgrading creates a scoped summary.
+
+For AutoProver and AutoFuzzer, estimate and launch resolve the exact remote
+commit and `contract-path` before issuing a quote or reserving balance. An
+unavailable commit returns `source_revision_not_found`; a missing or unreadable
+contract returns `contract_not_found`. Guardian reports both as terminal input
+errors, so correcting the repository access or path and rerunning is safe.
 
 ## Inputs
 
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `api-key` | Yes | - | Zeus API key (`zeus_live_...`) |
-| `context` | Yes | - | Comma-separated glob patterns for files to analyze |
-| `github-token` | No | `${{ github.token }}` | GitHub token for issues/comments and private repo access |
-| `api-base-url` | No | `https://zeus.certora.com` | Zeus API base URL |
-| `audit-type` | No | `diff` | `"diff"` (changed files only) or `"full"` (entire codebase) |
-| `scope` | No | - | Comma-separated scope patterns for full audits (subset of context) |
-| `preprompt` | No | - | Custom instructions for the audit |
-| `use-memory` | No | `true` | Use repo memory for full audits; set to `false` to skip accepted assumptions |
-| `max-iterations` | No | `6` | DeepDive iterations (4-10) |
-| `skip-submodules` | No | `false` | Skip git submodule loading |
-| `poll-interval` | No | `60` | Seconds between status polls |
-| `timeout` | No | `120` | Maximum minutes to wait for completion |
-| `create-issues` | No | `true` | Create GitHub issues for findings |
-| `issue-severities` | No | `HIGH,MEDIUM` | Which severities create GitHub issues (`HIGH,MEDIUM,LOW,INFO`) |
-| `comment-on-pr` | No | `true` | Post summary comment on the PR |
-| `fail-on` | No | - | Fail the action if these severities are found |
-| `labels` | No | `zeus-audit,security` | Labels added to created issues |
+| Input               | Required           | Default                   | Description                                            |
+| ------------------- | ------------------ | ------------------------- | ------------------------------------------------------ |
+| `api-key`           | Yes                | —                         | Certora organization API key                           |
+| `workflow`          | No                 | `ai-auditor-diff`         | One of the five workflows listed above                 |
+| `configuration-id`  | No                 | Empty (legacy identity)  | Stable distinct ID for each installed configuration    |
+| `model-mode`        | No                 | Empty (Normal)           | AI Auditor model set: `normal` or `frontier`             |
+| `context`           | No                 | Empty (automatic)         | Optional AI Auditor context override; server selects context when empty |
+| `finding`           | Finding validation | —                         | Finding description to validate, up to 8000 characters |
+| `scope`             | Full auto context  | —                         | Full-run audit paths; optional subset with explicit context |
+| `instructions`      | No                 | —                         | Custom AI Auditor instructions, up to 10,000 chars     |
+| `use-memory`        | No                 | `true`                    | Use repository memory for full runs                    |
+| `max-iterations`    | No                 | `6`                       | Full/diff AI Auditor iterations, from 2 through 10     |
+| `skip-submodules`   | No                 | `false`                   | Skip repository submodules                             |
+| `github-token`      | No                 | `${{ github.token }}`     | Local GitHub operations only; never sent to Certora    |
+| `api-base-url`      | No                 | `https://app.certora.com` | Certora API base URL                                   |
+| `poll-interval`     | No                 | `60`                      | Seconds between run polls                              |
+| `wait-for-completion` | No               | `false` for full/diff; otherwise `true` | Wait on this runner; false requires the server-owned audit check |
+| `timeout`           | No                 | `120`                     | Runner minutes for launch/handoff or synchronous completion, not the server deadline |
+| `create-issues`     | No                 | `true`                    | Create AI Auditor finding issues                       |
+| `issue-severities`  | No                 | `HIGH,MEDIUM`             | Severities that create issues                          |
+| `comment-on-pr`     | No                 | `true`                    | Post or update the PR summary                          |
+| `fail-on`           | No                 | —                         | AI Auditor severities that fail the check              |
+| `labels`            | No                 | `ai-auditor,security`     | Labels added to finding issues                         |
+| `contract-path`     | AP/AF              | —                         | Repository-relative `.sol` path                        |
+| `contract-name`     | AP/AF              | —                         | Solidity contract declaration name                     |
+| `design-doc-path`   | No                 | —                         | Repository-relative `.md`, `.markdown`, or `.pdf`      |
+| `threat-model-path` | No                 | —                         | AutoProver-only threat model path                      |
 
 ## Outputs
 
-| Output | Description |
-|--------|-------------|
-| `job-id` | Zeus audit job ID |
-| `status` | Final status (`succeeded`, `failed`, `cancelled`) |
-| `highs-count` | Number of HIGH findings |
-| `mediums-count` | Number of MEDIUM findings |
-| `lows-count` | Number of LOW findings |
-| `infos-count` | Number of INFO findings |
-| `issues-created` | Comma-separated list of created issue references |
+| Output                 | Description                                        |
+| ---------------------- | -------------------------------------------------- |
+| `run-id`               | Certora run ID                                     |
+| `workflow`             | Selected workflow                                  |
+| `model-mode`           | AI Auditor mode; empty for other engines or unrecorded historical runs |
+| `status`               | Last canonical run status                          |
+| `check-run-id`         | Server-owned Security Review check ID after async handoff |
+| `check-run-url`        | Server-owned Security Review check URL after async handoff |
+| `highs-count`          | AI Auditor HIGH finding count                      |
+| `mediums-count`        | AI Auditor MEDIUM finding count                    |
+| `lows-count`           | AI Auditor LOW finding count                       |
+| `infos-count`          | AI Auditor INFO finding count                      |
+| `issues-created`       | Comma-separated created or reused issue references |
+| `run-outcome`          | AutoProver or AutoFuzzer report outcome            |
+| `generated-files`      | Comma-separated generated repository paths         |
+| `generated-commit-sha` | Generated commit SHA, or empty for `no_changes`    |
+| `validation-verdict`   | Finding validation verdict (`VALID` or `INVALID`)  |
+| `validation-severity`  | Finding validation severity, when assigned         |
 
-## Issue Deduplication
+Finding-count outputs are empty after asynchronous handoff, not zero. Read the
+server-owned check or the canonical run result for the eventual findings.
 
-The action avoids creating duplicate issues:
+## Custom API environment
 
-- Each finding creates an issue with a unique title: `[Zeus] HIGH: Finding Title (H-01)`
-- Before creating, it searches for open issues with the same title and `zeus-audit` label
-- If a duplicate is found, it adds a comment noting the finding recurred in the new PR
-- Closing an issue "dismisses" it — if the same finding appears in a future PR, a new issue is created
-
-## PR Comment
-
-The action **always** posts a summary comment on the PR — including when no findings are detected, so you can confirm Zeus ran successfully.
-
-When findings exist, the comment includes:
-- Severity breakdown table
-- Links to created/updated issues
-- LOW and INFO findings in a collapsible section
-- Job ID and cost information
-
-When no findings are detected, you get a clean "No Findings" confirmation.
-
-Re-running the action updates the existing comment rather than posting a new one.
-
-## Credits
-
-Each diff audit consumes **1 Zeus credit**. Credits are refunded if the Zeus backend fails to start the audit. See [zeus.certora.com](https://zeus.certora.com) for pricing.
+```yaml
+- uses: Certora/autoprover-guardian-ci@v2
+  with:
+    api-key: ${{ secrets.CERTORA_API_KEY }}
+    workflow: ai-auditor-diff
+    api-base-url: "https://your-certora-deployment.example.com"
+```
 
 ## License
 
