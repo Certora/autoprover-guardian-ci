@@ -21,7 +21,7 @@ export declare class GitHubClient {
     createOrUpdateIssue(finding: Finding, runId: string, prNumber: number, labels: string[]): Promise<string | null>;
     upsertPrComment(prNumber: number, body: string, marker: string | undefined, expectedHeadSha: string, runId: string): Promise<void>;
     private isCurrentPrHead;
-    getGeneratedFollowup(headSha: string): Promise<{
+    getGeneratedFollowup(headSha: string, deadlineMs?: number): Promise<{
         runId: string;
         sourceCommitSha: string;
     } | null>;

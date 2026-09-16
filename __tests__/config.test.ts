@@ -49,7 +49,8 @@ describe("getConfig v2", () => {
     githubContextMock.payload.repository.private = false;
     githubContextMock.payload.pull_request.base.ref = "main";
     githubContextMock.payload.pull_request.head.ref = "feature/review";
-    githubContextMock.payload.pull_request.base.repo.full_name = "Certora/autoprover-guardian-ci";
+    githubContextMock.payload.pull_request.base.repo.full_name =
+      "Certora/autoprover-guardian-ci";
     githubContextMock.payload.pull_request.head.repo.full_name =
       "Certora/autoprover-guardian-ci";
     githubContextMock.runAttempt = 2;
@@ -82,6 +83,26 @@ describe("getConfig v2", () => {
     expect(setSecretMock).toHaveBeenCalledWith("ghs_test");
   });
 
+  it("accepts a stable named configuration and preserves omitted legacy identity", () => {
+    expect(getConfig().configurationId).toBeUndefined();
+    inputs.set("configuration-id", "auto-prover-vault-2");
+    expect(getConfig().configurationId).toBe("auto-prover-vault-2");
+    inputs.set("configuration-id", "a".repeat(120));
+    expect(getConfig().configurationId).toHaveLength(120);
+  });
+
+  it.each([
+    "Uppercase",
+    "-leading",
+    "under_score",
+    "space value",
+    "a".repeat(121),
+    "bad:identity",
+  ])("rejects invalid configuration-id %s", (value) => {
+    inputs.set("configuration-id", value);
+    expect(() => getConfig()).toThrow("configuration-id must be");
+  });
+
   it.each(["ai-auditor-full", "ai-auditor-diff"])(
     "supports an explicit synchronous override for %s",
     (workflow) => {
@@ -93,34 +114,58 @@ describe("getConfig v2", () => {
     },
   );
 
-  it.each(["base", "head"] as const)("requires the event's %s branch identity for diff reviews", (side) => {
-    githubContextMock.payload.pull_request[side].ref = "";
-    expect(() => getConfig()).toThrow("Diff reviews require named base and head branches");
-  });
+  it.each(["base", "head"] as const)(
+    "requires the event's %s branch identity for diff reviews",
+    (side) => {
+      githubContextMock.payload.pull_request[side].ref = "";
+      expect(() => getConfig()).toThrow(
+        "Diff reviews require named base and head branches",
+      );
+    },
+  );
 
-  it.each(["base", "head"] as const)("rejects a mismatched %s repository for diff reviews", (side) => {
-    githubContextMock.payload.pull_request[side].repo.full_name = "other/repository";
-    expect(() => getConfig()).toThrow("fork or mismatched pull requests");
-  });
+  it.each(["base", "head"] as const)(
+    "rejects a mismatched %s repository for diff reviews",
+    (side) => {
+      githubContextMock.payload.pull_request[side].repo.full_name =
+        "other/repository";
+      expect(() => getConfig()).toThrow("fork or mismatched pull requests");
+    },
+  );
 
   it.each(["auto-prover", "auto-fuzzer", "ai-auditor-finding-validation"])(
     "does not silently detach unsupported workflow %s",
     (workflow) => {
       inputs.set("workflow", workflow);
       inputs.set("wait-for-completion", "false");
-      expect(() => getConfig()).toThrow("only supported by full/diff AI Auditor");
+      expect(() => getConfig()).toThrow(
+        "only supported by full/diff AI Auditor",
+      );
     },
   );
 
   it("rejects malformed wait-for-completion values", () => {
     inputs.set("wait-for-completion", "sometimes");
-    expect(() => getConfig()).toThrow("wait-for-completion must be either true or false");
+    expect(() => getConfig()).toThrow(
+      "wait-for-completion must be either true or false",
+    );
   });
 
-  it.each(["ai-auditor-full", "ai-auditor-diff", "ai-auditor-finding-validation"])(
+  it.each([
+    "ai-auditor-full",
+    "ai-auditor-diff",
+    "ai-auditor-finding-validation",
+  ])(
     "preserves mixed-language context for %s without requiring Solidity",
     (workflow) => {
-      const context = ["src/**/*.py", "web/**/*.ts", "lib/**/*.rs", "server/**/*.go", "bin/worker", "Cargo.toml"];
+      const context = [
+        "src/**/*.py",
+        "web/**/*.ts",
+        "lib/**/*.rs",
+        "server/**/*.go",
+        "bin/worker",
+        "Cargo.toml",
+      ];
       inputs.set("workflow", workflow);
       inputs.set("context", context.join(","));
       inputs.set("scope", "src/api.py");
@@ -164,14 +209,24 @@ describe("getConfig v2", () => {
     it("accepts a multiline JSON array and normalizes whitespace like the API", () => {
       inputs.set(field, '[\n  " src/a,b.ts ",\n  "!src/tests/**"\n]');
 
-      expect(getConfig()).toHaveProperty(field, ["src/a,b.ts", "!src/tests/**"]);
+      expect(getConfig()).toHaveProperty(field, [
+        "src/a,b.ts",
+        "!src/tests/**",
+      ]);
     });
 
     it("preserves legacy comma-separated patterns including nested glob groups", () => {
-      inputs.set(field, " src/*.{ts,tsx},lib/{one,{two,three}}/**,[a,b]/**,src/@(a,b).ts,!src/tests/** ");
+      inputs.set(
+        field,
+        " src/*.{ts,tsx},lib/{one,{two,three}}/**,[a,b]/**,src/@(a,b).ts,!src/tests/** ",
+      );
 
       expect(getConfig()).toHaveProperty(field, [
-        "src/*.{ts,tsx}", "lib/{one,{two,three}}/**", "[a,b]/**", "src/@(a,b).ts", "!src/tests/**",
+        "src/*.{ts,tsx}",
+        "lib/{one,{two,three}}/**",
+        "[a,b]/**",
+        "src/@(a,b).ts",
+        "!src/tests/**",
       ]);
     });
 
@@ -185,22 +240,37 @@ describe("getConfig v2", () => {
 
     it("preserves escaped glob commas without treating them as list separators", () => {
       inputs.set(field, String.raw`src/a\,b.ts,src/other.ts`);
-      expect(getConfig()).toHaveProperty(field, [String.raw`src/a\,b.ts`, "src/other.ts"]);
+      expect(getConfig()).toHaveProperty(field, [
+        String.raw`src/a\,b.ts`,
+        "src/other.ts",
+      ]);
     });
 
     it.each(['["src/file.ts",]', '["src/file.ts"', "["])(
       "rejects malformed intended JSON %s",
       (value) => {
         inputs.set(field, value);
-        expect(() => getConfig()).toThrow(`${field} must be a valid JSON array`);
+        expect(() => getConfig()).toThrow(
+          `${field} must be a valid JSON array`,
+        );
       },
     );
 
-    it.each(['[42]', '[null]', '[true]', '[{}]', '[["src/**"]]', '[""]', '["  "]'])(
+    it.each([
+      "[42]",
+      "[null]",
+      "[true]",
+      "[{}]",
+      '[["src/**"]]',
+      '[""]',
+      '["  "]',
+    ])(
       "rejects JSON values other than non-empty pattern strings: %s",
       (value) => {
         inputs.set(field, value);
-        expect(() => getConfig()).toThrow("JSON array of non-empty pattern strings");
+        expect(() => getConfig()).toThrow(
+          "JSON array of non-empty pattern strings",
+        );
       },
     );
 
@@ -208,10 +278,13 @@ describe("getConfig v2", () => {
       [["x".repeat(501)], "500 characters"],
       [["src/\u0000file.ts"], "null bytes"],
       [Array.from({ length: 5_001 }, () => "src/**"), "5000 patterns"],
-    ] as const)("enforces API limits for structured patterns", (patterns, error) => {
-      inputs.set(field, JSON.stringify(patterns));
-      expect(() => getConfig()).toThrow(error);
-    });
+    ] as const)(
+      "enforces API limits for structured patterns",
+      (patterns, error) => {
+        inputs.set(field, JSON.stringify(patterns));
+        expect(() => getConfig()).toThrow(error);
+      },
+    );
 
     it("accepts the API array and pattern-length boundaries", () => {
       const patterns = Array.from({ length: 5_000 }, () => "a".repeat(500));
@@ -243,17 +316,26 @@ describe("getConfig v2", () => {
       (workflow) => {
         inputs.set("workflow", workflow);
         inputs.set("model-mode", mode);
-        expect(getConfig()).toMatchObject({ modelMode: mode, maxIterations: 6 });
+        expect(getConfig()).toMatchObject({
+          modelMode: mode,
+          maxIterations: 6,
+        });
       },
     );
 
     describe.each(["ai-auditor-full", "ai-auditor-diff"])("%s", (workflow) => {
-      it.each([2, 3, 4, 6, 10])("preserves an explicit %i iteration override", (iterations) => {
-        inputs.set("workflow", workflow);
-        inputs.set("model-mode", mode);
-        inputs.set("max-iterations", String(iterations));
-        expect(getConfig()).toMatchObject({ modelMode: mode, maxIterations: iterations });
-      });
+      it.each([2, 3, 4, 6, 10])(
+        "preserves an explicit %i iteration override",
+        (iterations) => {
+          inputs.set("workflow", workflow);
+          inputs.set("model-mode", mode);
+          inputs.set("max-iterations", String(iterations));
+          expect(getConfig()).toMatchObject({
+            modelMode: mode,
+            maxIterations: iterations,
+          });
+        },
+      );
 
       it.each(["-1", "0", "1", "11", "2.5", "NaN", "Infinity"])(
         "rejects iteration input %j outside the whole-number range 2-10",
@@ -261,7 +343,9 @@ describe("getConfig v2", () => {
           inputs.set("workflow", workflow);
           inputs.set("model-mode", mode);
           inputs.set("max-iterations", iterations);
-          expect(() => getConfig()).toThrow("max-iterations must be between 2 and 10.");
+          expect(() => getConfig()).toThrow(
+            "max-iterations must be between 2 and 10.",
+          );
         },
       );
     });
@@ -275,17 +359,27 @@ describe("getConfig v2", () => {
       expect(config).not.toHaveProperty("maxIterations");
     });
 
-    it.each(["auto-prover", "auto-fuzzer"])("rejects the input for %s", (workflow) => {
-      inputs.set("workflow", workflow);
-      inputs.set("model-mode", mode);
-      expect(() => getConfig()).toThrow("model-mode is only supported by AI Auditor workflows");
-    });
+    it.each(["auto-prover", "auto-fuzzer"])(
+      "rejects the input for %s",
+      (workflow) => {
+        inputs.set("workflow", workflow);
+        inputs.set("model-mode", mode);
+        expect(() => getConfig()).toThrow(
+          "model-mode is only supported by AI Auditor workflows",
+        );
+      },
+    );
   });
 
-  it.each(["fast", "Frontier", "normal,frontier"])("rejects model-mode %j", (mode) => {
-    inputs.set("model-mode", mode);
-    expect(() => getConfig()).toThrow('model-mode must be "normal" or "frontier"');
-  });
+  it.each(["fast", "Frontier", "normal,frontier"])(
+    "rejects model-mode %j",
+    (mode) => {
+      inputs.set("model-mode", mode);
+      expect(() => getConfig()).toThrow(
+        'model-mode must be "normal" or "frontier"',
+      );
+    },
+  );
 
   it("accepts both explicit AI Auditor workflows and custom instructions", () => {
     inputs.set("workflow", "ai-auditor-full");
@@ -329,16 +423,24 @@ describe("getConfig v2", () => {
     },
   );
 
-  it.each(["", "  ", ", ,"])("requires full auto audit scope for %j", (scope) => {
-    inputs.set("workflow", "ai-auditor-full");
-    inputs.delete("context");
-    inputs.set("scope", scope);
-    expect(() => getConfig()).toThrow("scope is required for full audits when context is selected automatically");
-  });
+  it.each(["", "  ", ", ,"])(
+    "requires full auto audit scope for %j",
+    (scope) => {
+      inputs.set("workflow", "ai-auditor-full");
+      inputs.delete("context");
+      inputs.set("scope", scope);
+      expect(() => getConfig()).toThrow(
+        "scope is required for full audits when context is selected automatically",
+      );
+    },
+  );
 
   it("preserves explicit full context without requiring a separate scope", () => {
     inputs.set("workflow", "ai-auditor-full");
-    expect(getConfig()).toMatchObject({ context: ["contracts/**/*.sol"], scope: undefined });
+    expect(getConfig()).toMatchObject({
+      context: ["contracts/**/*.sol"],
+      scope: undefined,
+    });
   });
 
   it("parses AutoProver contract and document inputs", () => {

@@ -69,7 +69,9 @@ describe("AutoProverApi v2", () => {
 
   it.each(
     (["pending", "in_progress", "completed"] as const).flatMap((status) =>
-      (["Security Review", "AI Auditor", "Zeus AI Audit"] as const).map((name) => ({ status, name })),
+      (["Security Review", "AI Auditor", "Zeus AI Audit"] as const).map(
+        (name) => ({ status, name }),
+      ),
     ),
   )(
     "decodes a persisted $name check with delivery status $status",
@@ -78,12 +80,18 @@ describe("AutoProverApi v2", () => {
       delivery.status = status;
       delivery.check.name = name;
       if (status === "completed") delivery.check.status = "completed";
-      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(
-        JSON.stringify({ request_id: "check", run: { ...run, delivery } }),
-        { status: 201 },
-      ));
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ request_id: "check", run: { ...run, delivery } }),
+          { status: 201 },
+        ),
+      );
       const api = new AutoProverApi("https://app.certora.com", "certora_test");
-      const response = await api.createRun("ai-auditor-full", body, "stable-key");
+      const response = await api.createRun(
+        "ai-auditor-full",
+        body,
+        "stable-key",
+      );
       expect(response.run.delivery).toEqual(delivery);
     },
   );
@@ -91,31 +99,106 @@ describe("AutoProverApi v2", () => {
   it.each([
     ["unowned", (delivery: any) => ({ ...delivery, managed_by: "client" })],
     ["missing check", (delivery: any) => ({ ...delivery, check: null })],
-    ["invalid PR", (delivery: any) => ({ ...delivery, pull_request_number: 0 })],
-    ["invalid ID", (delivery: any) => ({ ...delivery, check: { ...delivery.check, id: -1 } })],
-    ["fractional ID", (delivery: any) => ({ ...delivery, check: { ...delivery.check, id: 1.5 } })],
-    ["wrong name", (delivery: any) => ({ ...delivery, check: { ...delivery.check, name: "Other check" } })],
-    ["invalid head", (delivery: any) => ({ ...delivery, check: { ...delivery.check, head_sha: "main" } })],
-    ["uncreated check", (delivery: any) => ({ ...delivery, check: { ...delivery.check, status: "queued" } })],
-    ["insecure URL", (delivery: any) => ({ ...delivery, check: { ...delivery.check, html_url: "http://github.com/Certora/contracts/runs/12345" } })],
-    ["untrusted URL", (delivery: any) => ({ ...delivery, check: { ...delivery.check, html_url: "https://attacker.invalid/check" } })],
-    ["credential URL", (delivery: any) => ({ ...delivery, check: { ...delivery.check, html_url: "https://user:secret@github.com/Certora/contracts/runs/12345" } })],
+    [
+      "invalid PR",
+      (delivery: any) => ({ ...delivery, pull_request_number: 0 }),
+    ],
+    [
+      "invalid ID",
+      (delivery: any) => ({
+        ...delivery,
+        check: { ...delivery.check, id: -1 },
+      }),
+    ],
+    [
+      "fractional ID",
+      (delivery: any) => ({
+        ...delivery,
+        check: { ...delivery.check, id: 1.5 },
+      }),
+    ],
+    [
+      "wrong name",
+      (delivery: any) => ({
+        ...delivery,
+        check: { ...delivery.check, name: "Other check" },
+      }),
+    ],
+    [
+      "invalid head",
+      (delivery: any) => ({
+        ...delivery,
+        check: { ...delivery.check, head_sha: "main" },
+      }),
+    ],
+    [
+      "uncreated check",
+      (delivery: any) => ({
+        ...delivery,
+        check: { ...delivery.check, status: "queued" },
+      }),
+    ],
+    [
+      "insecure URL",
+      (delivery: any) => ({
+        ...delivery,
+        check: {
+          ...delivery.check,
+          html_url: "http://github.com/Certora/contracts/runs/12345",
+        },
+      }),
+    ],
+    [
+      "untrusted URL",
+      (delivery: any) => ({
+        ...delivery,
+        check: {
+          ...delivery.check,
+          html_url: "https://attacker.invalid/check",
+        },
+      }),
+    ],
+    [
+      "credential URL",
+      (delivery: any) => ({
+        ...delivery,
+        check: {
+          ...delivery.check,
+          html_url:
+            "https://user:secret@github.com/Certora/contracts/runs/12345",
+        },
+      }),
+    ],
   ])("rejects malformed server handshakes: %s", async (_label, mutate) => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(
-      JSON.stringify({ request_id: "check", run: { ...run, delivery: mutate(serverDelivery()) } }),
-      { status: 201 },
-    ));
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          request_id: "check",
+          run: { ...run, delivery: mutate(serverDelivery()) },
+        }),
+        { status: 201 },
+      ),
+    );
     const api = new AutoProverApi("https://app.certora.com", "certora_test");
-    await expect(api.createRun("ai-auditor-full", body, "stable-key")).rejects.toThrow("malformed run");
+    await expect(
+      api.createRun("ai-auditor-full", body, "stable-key"),
+    ).rejects.toThrow("malformed run");
   });
 
   it("does not reinterpret standalone generated-file delivery as an audit check", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(
-      JSON.stringify({ request_id: "check", run: { ...run, run_type: "auto_prover", delivery: serverDelivery() } }),
-      { status: 201 },
-    ));
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          request_id: "check",
+          run: { ...run, run_type: "auto_prover", delivery: serverDelivery() },
+        }),
+        { status: 201 },
+      ),
+    );
     const api = new AutoProverApi("https://app.certora.com", "certora_test");
-    await expect(api.getRun(run.id)).rejects.toThrow("server-managed audit delivery on a different workflow");
+    await expect(api.getRun(run.id)).rejects.toThrow(
+      "server-managed audit delivery on a different workflow",
+    );
   });
 
   it("estimates through the workflow collection with Bearer authentication", async () => {
@@ -291,6 +374,100 @@ describe("AutoProverApi v2", () => {
         "stable-seed",
       ),
     ).toBe(frontier);
+  });
+
+  it("keeps named configuration launches independent even with identical run/job/engine/contract inputs", () => {
+    const first = {
+      ...body,
+      client_reference: "certora-guardian:configuration:first",
+    };
+    const second = {
+      ...body,
+      client_reference: "certora-guardian:configuration:second",
+    };
+    const key = createIdempotencyKey("auto-prover", first, "same-run:job");
+    expect(createIdempotencyKey("auto-prover", first, "same-run:job")).toBe(
+      key,
+    );
+    expect(
+      createIdempotencyKey("auto-prover", second, "same-run:job"),
+    ).not.toBe(key);
+  });
+
+  it("looks up a configuration using exact read-only filters and a two-result ambiguity bound", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          request_id: "list",
+          runs: [run],
+          next_cursor: null,
+        }),
+        { status: 200 },
+      ),
+    );
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+    await expect(
+      api.findRunsByReference({
+        workflow: "ai-auditor-full",
+        repositoryUrl: body.source.repository_url,
+        commitSha: body.source.commit_sha,
+        clientReference: "configuration:one",
+      }),
+    ).resolves.toEqual({ request_id: "list", runs: [run], next_cursor: null });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, options] = fetchMock.mock.calls[0];
+    const parsed = new URL(String(url));
+    expect(parsed.pathname).toBe("/v2/runs");
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({
+      run_type: "ai_auditor_full",
+      repository_url: body.source.repository_url,
+      commit_sha: body.source.commit_sha,
+      client_reference: "configuration:one",
+      limit: "2",
+    });
+    expect(options?.method ?? "GET").toBe("GET");
+    expect(options?.body).toBeUndefined();
+  });
+
+  it.each([
+    { runs: [], next_cursor: undefined },
+    { runs: [], next_cursor: "malformed" },
+    { runs: null, next_cursor: null },
+    { runs: [run, run, run], next_cursor: null },
+    { runs: [{ ...run, source: {} }], next_cursor: null },
+  ])("rejects malformed bounded run lookup %j", async (value) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ request_id: "list", ...value }), {
+        status: 200,
+      }),
+    );
+    const api = new AutoProverApi("https://app.certora.com", "certora_test");
+    await expect(
+      api.findRunsByReference({
+        workflow: "auto-prover",
+        repositoryUrl: body.source.repository_url,
+        commitSha: body.source.commit_sha,
+        clientReference: "own",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("does not start a run lookup after its shared request deadline", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const api = new AutoProverApi(
+      "https://app.certora.com",
+      "certora_test",
+      Date.now() - 1,
+    );
+    await expect(
+      api.findRunsByReference({
+        workflow: "auto-prover",
+        repositoryUrl: body.source.repository_url,
+        commitSha: body.source.commit_sha,
+        clientReference: "own",
+      }),
+    ).rejects.toThrow("timeout expired");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it.each([undefined, null, "normal", "frontier"])(
@@ -653,19 +830,17 @@ describe("AutoProverApi v2", () => {
 
   it("fails with reset guidance without an early retry when Retry-After exceeds the budget", async () => {
     vi.useFakeTimers();
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            status: 429,
-            code: "rate_limit_exceeded",
-            detail: "Wait",
-            retryable: true,
-          }),
-          { status: 429, headers: { "Retry-After": "3600" } },
-        ),
-      );
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          status: 429,
+          code: "rate_limit_exceeded",
+          detail: "Wait",
+          retryable: true,
+        }),
+        { status: 429, headers: { "Retry-After": "3600" } },
+      ),
+    );
     const api = new AutoProverApi(
       "https://app.certora.com",
       "certora_test",
@@ -756,13 +931,11 @@ describe("AutoProverApi v2", () => {
 
   it("uses the shared deadline for result and generated-file requests, with an explicit cancellation grace override", async () => {
     vi.useFakeTimers();
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        new Response(JSON.stringify({ request_id: "req-cancel", run }), {
-          status: 202,
-        }),
-      );
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ request_id: "req-cancel", run }), {
+        status: 202,
+      }),
+    );
     const api = new AutoProverApi(
       "https://app.certora.com",
       "certora_test",

@@ -89,11 +89,15 @@ export class GitHubClient {
       !name.includes("@{") &&
       !name.startsWith("refs/") &&
       !name.endsWith(".") &&
-      name.split("/").every((part) =>
-        part.length > 0 && !part.startsWith(".") && !part.endsWith(".lock"),
-      );
+      name
+        .split("/")
+        .every(
+          (part) =>
+            part.length > 0 && !part.startsWith(".") && !part.endsWith(".lock"),
+        );
     if (
-      args.repositoryUrl.toLowerCase() !== `https://github.com/${expectedRepository}` ||
+      args.repositoryUrl.toLowerCase() !==
+        `https://github.com/${expectedRepository}` ||
       !Number.isSafeInteger(args.prNumber) ||
       args.prNumber <= 0 ||
       !SHA_REGEX.test(args.headCommitSha) ||
@@ -107,9 +111,8 @@ export class GitHubClient {
 
     try {
       const requestOptions = () => {
-        const remaining = args.deadlineMs === undefined
-          ? 15_000
-          : args.deadlineMs - Date.now();
+        const remaining =
+          args.deadlineMs === undefined ? 15_000 : args.deadlineMs - Date.now();
         if (!Number.isFinite(remaining) || remaining <= 0) {
           throw new DiffSourceVerificationError(
             "The configured timeout expired while verifying the current branches. No audit was launched.",
@@ -420,12 +423,18 @@ export class GitHubClient {
 
   async getGeneratedFollowup(
     headSha: string,
+    deadlineMs?: number,
   ): Promise<{ runId: string; sourceCommitSha: string } | null> {
     try {
+      const remainingMs =
+        deadlineMs === undefined ? 15_000 : deadlineMs - Date.now();
+      if (remainingMs <= 0)
+        throw new Error("Generated-commit verification deadline expired.");
       const { data: commit } = await this.octokit.rest.repos.getCommit({
         owner: this.owner,
         repo: this.repo,
         ref: headSha,
+        request: { signal: AbortSignal.timeout(Math.min(15_000, remainingMs)) },
       });
       if (commit.sha.toLowerCase() !== headSha.toLowerCase()) {
         throw new Error("GitHub returned a different head commit.");

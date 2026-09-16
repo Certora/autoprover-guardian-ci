@@ -1,4 +1,4 @@
-import type { CommitGeneratedFilesResponse, EstimateResponse, RunRequest, RunResponse, RunResultResponse, Workflow } from "./types";
+import type { CommitGeneratedFilesResponse, EstimateResponse, RunRequest, RunListResponse, RunResponse, RunResultResponse, Workflow } from "./types";
 export declare class AutoProverApiError extends Error {
     code: string;
     statusCode: number;
@@ -21,6 +21,13 @@ export declare class AutoProverApi {
     estimateRun(workflow: Workflow, body: RunRequest): Promise<EstimateResponse>;
     createRun(workflow: Workflow, body: RunRequest, idempotencyKey: string, estimateQuoteId?: string): Promise<RunResponse>;
     getRun(runId: string, deadlineMs?: number): Promise<RunResponse>;
+    /** Read-only, deliberately limited to two results so ambiguous recovery fails closed. */
+    findRunsByReference(args: {
+        workflow: Workflow;
+        repositoryUrl: string;
+        commitSha: string;
+        clientReference: string;
+    }): Promise<RunListResponse>;
     getResult(runId: string, deadlineMs?: number): Promise<RunResultResponse>;
     cancelRun(runId: string, deadlineMs?: number): Promise<RunResponse>;
     commitGeneratedFiles(runId: string): Promise<CommitGeneratedFilesResponse>;

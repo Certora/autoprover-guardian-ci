@@ -199,6 +199,12 @@ export type RunResponse = {
   run: Run;
 };
 
+export type RunListResponse = {
+  request_id: string;
+  runs: Run[];
+  next_cursor: string | null;
+};
+
 export type Finding = {
   id: string;
   title: string;
@@ -345,6 +351,7 @@ export type ProblemDetails = {
 
 type CommonActionConfig = {
   workflow: Workflow;
+  configurationId?: string;
   apiKey: string;
   apiBaseUrl: string;
   githubToken: string;

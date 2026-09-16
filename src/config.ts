@@ -61,12 +61,18 @@ function parsePatternInput(input: string, name: string): string[] {
       // legacy glob. A leading JSON string (or unfinished array) is not:
       // never silently reinterpret a malformed explicit context as a glob.
       if (/^\[\s*(?:"|$)/.test(value)) {
-        throw new Error(`${name} must be a valid JSON array of pattern strings.`);
+        throw new Error(
+          `${name} must be a valid JSON array of pattern strings.`,
+        );
       }
     }
     if (Array.isArray(parsed)) {
-      if (parsed.some((pattern) => typeof pattern !== "string" || !pattern.trim())) {
-        throw new Error(`${name} must be a JSON array of non-empty pattern strings.`);
+      if (
+        parsed.some((pattern) => typeof pattern !== "string" || !pattern.trim())
+      ) {
+        throw new Error(
+          `${name} must be a JSON array of non-empty pattern strings.`,
+        );
       }
       return (parsed as string[]).map((pattern) => pattern.trim());
     }
@@ -296,6 +302,15 @@ export function getConfig(): ActionConfig {
   }
   const repositoryPrivate = repositoryPrivateValue;
   const workflow = parseWorkflow(core.getInput("workflow"));
+  const configurationId = core.getInput("configuration-id").trim() || undefined;
+  if (
+    configurationId !== undefined &&
+    !/^[a-z0-9][a-z0-9-]{0,119}$/.test(configurationId)
+  ) {
+    throw new Error(
+      "configuration-id must be 1-120 lowercase letters, digits, or hyphens, starting with a letter or digit.",
+    );
+  }
   if (workflow === "ai-auditor-diff") {
     const expectedRepository = `${owner}/${repo}`.toLowerCase();
     if (
@@ -380,6 +395,7 @@ export function getConfig(): ActionConfig {
       pr.number,
       headSha,
     ].join(":"),
+    ...(configurationId ? { configurationId } : {}),
   };
 
   if (workflow === "auto-prover" || workflow === "auto-fuzzer") {
@@ -470,8 +486,14 @@ export function getConfig(): ActionConfig {
 
   const scopeInput = core.getInput("scope") || "";
   const scope = parseApiPatternList(scopeInput, "scope");
-  if (workflow === "ai-auditor-full" && context.length === 0 && scope.length === 0) {
-    throw new Error("scope is required for full audits when context is selected automatically.");
+  if (
+    workflow === "ai-auditor-full" &&
+    context.length === 0 &&
+    scope.length === 0
+  ) {
+    throw new Error(
+      "scope is required for full audits when context is selected automatically.",
+    );
   }
 
   return {

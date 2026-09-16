@@ -15,6 +15,7 @@ const {
     estimateRun: vi.fn(),
     createRun: vi.fn(),
     getRun: vi.fn(),
+    findRunsByReference: vi.fn(),
     getResult: vi.fn(),
     cancelRun: vi.fn(),
     commitGeneratedFiles: vi.fn(),
@@ -387,13 +388,21 @@ describe("run v2 orchestration", () => {
     createIdempotencyKeyMock.mockReturnValue("certora-guardian-stable");
     getGeneratedFollowupMock.mockResolvedValue(null);
     resolveDiffSourceMock.mockReset();
-    resolveDiffSourceMock.mockResolvedValue({ baseCommitSha: "a".repeat(40), headCommitSha: HEAD_SHA });
+    resolveDiffSourceMock.mockResolvedValue({
+      baseCommitSha: "a".repeat(40),
+      headCommitSha: HEAD_SHA,
+    });
     apiMethods.estimateRun.mockResolvedValue(estimate());
     apiMethods.cancelRun.mockResolvedValue({
       request_id: "req-cancel",
       run: runResource("ai-auditor-diff", "cancelling"),
     });
     apiMethods.commitGeneratedFiles.mockResolvedValue(commit);
+    apiMethods.findRunsByReference.mockResolvedValue({
+      request_id: "list",
+      runs: [],
+      next_cursor: null,
+    });
   });
 
   describe("asynchronous full/diff audit handoff", () => {
@@ -401,33 +410,67 @@ describe("run v2 orchestration", () => {
       const config = { ...aiConfig(), waitForCompletion: false };
       const freshBase = "c".repeat(40);
       getConfigMock.mockReturnValue(config);
-      resolveDiffSourceMock.mockResolvedValue({ baseCommitSha: freshBase, headCommitSha: HEAD_SHA });
+      resolveDiffSourceMock.mockResolvedValue({
+        baseCommitSha: freshBase,
+        headCommitSha: HEAD_SHA,
+      });
       const accepted = managedAuditRun();
       accepted.source.base_commit_sha = freshBase;
-      apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: accepted });
+      apiMethods.createRun.mockResolvedValue({
+        request_id: "launch",
+        run: accepted,
+      });
 
       await run();
 
-      expect(resolveDiffSourceMock).toHaveBeenCalledExactlyOnceWith({ ...config, deadlineMs: expect.any(Number) });
-      expect(apiMethods.createRun).toHaveBeenCalledWith("ai-auditor-diff", expect.objectContaining({
-        source: expect.objectContaining({ base_commit_sha: freshBase, head_commit_sha: HEAD_SHA }),
-      }), "certora-guardian-stable");
-      expect(createIdempotencyKeyMock).toHaveBeenCalledWith("ai-auditor-diff", buildRunRequest(config), config.idempotencySeed);
+      expect(resolveDiffSourceMock).toHaveBeenCalledExactlyOnceWith({
+        ...config,
+        deadlineMs: expect.any(Number),
+      });
+      expect(apiMethods.createRun).toHaveBeenCalledWith(
+        "ai-auditor-diff",
+        expect.objectContaining({
+          source: expect.objectContaining({
+            base_commit_sha: freshBase,
+            head_commit_sha: HEAD_SHA,
+          }),
+        }),
+        "certora-guardian-stable",
+      );
+      expect(createIdempotencyKeyMock).toHaveBeenCalledWith(
+        "ai-auditor-diff",
+        buildRunRequest(config),
+        config.idempotencySeed,
+      );
       expect(config.baseCommitSha).toBe("a".repeat(40));
     });
 
-    it.each(["stale head", "closed PR", "fork PR", "retargeted PR", "GitHub unavailable"])("does no paid work when diff-source verification fails: %s", async (reason) => {
-      getConfigMock.mockReturnValue({ ...aiConfig(), waitForCompletion: false });
-      resolveDiffSourceMock.mockRejectedValue(new Error(reason));
-      await expect(run()).rejects.toThrow(reason);
-      expect(apiMethods.createRun).not.toHaveBeenCalled();
-      expect(apiMethods.estimateRun).not.toHaveBeenCalled();
-      expect(apiMethods.cancelRun).not.toHaveBeenCalled();
-    });
+    it.each([
+      "stale head",
+      "closed PR",
+      "fork PR",
+      "retargeted PR",
+      "GitHub unavailable",
+    ])(
+      "does no paid work when diff-source verification fails: %s",
+      async (reason) => {
+        getConfigMock.mockReturnValue({
+          ...aiConfig(),
+          waitForCompletion: false,
+        });
+        resolveDiffSourceMock.mockRejectedValue(new Error(reason));
+        await expect(run()).rejects.toThrow(reason);
+        expect(apiMethods.createRun).not.toHaveBeenCalled();
+        expect(apiMethods.estimateRun).not.toHaveBeenCalled();
+        expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+      },
+    );
 
     it.each(
       (["ai-auditor-full", "ai-auditor-diff"] as const).flatMap((workflow) =>
-        (["Security Review", "AI Auditor", "Zeus AI Audit"] as const).map((checkName) => ({ workflow, checkName })),
+        (["Security Review", "AI Auditor", "Zeus AI Audit"] as const).map(
+          (checkName) => ({ workflow, checkName }),
+        ),
       ),
     )(
       "hands off $workflow with a persisted $checkName check and current branding",
@@ -440,23 +483,32 @@ describe("run v2 orchestration", () => {
           failOn: ["HIGH"] as const,
         };
         getConfigMock.mockReturnValue(config);
-        apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: managedAuditRun(workflow, "queued", checkName) });
+        apiMethods.createRun.mockResolvedValue({
+          request_id: "launch",
+          run: managedAuditRun(workflow, "queued", checkName),
+        });
 
         await run();
 
-        expect(apiMethods.createRun).toHaveBeenCalledWith(workflow, expect.objectContaining({
-          delivery: {
-            type: "github_pull_request",
-            pull_request_number: 42,
-            head_commit_sha: HEAD_SHA,
-            create_issues: true,
-            comment_on_pr: true,
-            issue_severities: ["HIGH", "MEDIUM"],
-            fail_on: ["HIGH"],
-            labels: ["ai-auditor", "security"],
-          },
-        }), "certora-guardian-stable");
-        expect(JSON.stringify(apiMethods.createRun.mock.calls)).not.toContain("ghs_local_only");
+        expect(apiMethods.createRun).toHaveBeenCalledWith(
+          workflow,
+          expect.objectContaining({
+            delivery: {
+              type: "github_pull_request",
+              pull_request_number: 42,
+              head_commit_sha: HEAD_SHA,
+              create_issues: true,
+              comment_on_pr: true,
+              issue_severities: ["HIGH", "MEDIUM"],
+              fail_on: ["HIGH"],
+              labels: ["ai-auditor", "security"],
+            },
+          }),
+          "certora-guardian-stable",
+        );
+        expect(JSON.stringify(apiMethods.createRun.mock.calls)).not.toContain(
+          "ghs_local_only",
+        );
         expect(apiMethods.getRun).not.toHaveBeenCalled();
         expect(apiMethods.getResult).not.toHaveBeenCalled();
         expect(apiMethods.cancelRun).not.toHaveBeenCalled();
@@ -465,15 +517,33 @@ describe("run v2 orchestration", () => {
         expect(setOutputMock).toHaveBeenCalledWith("run-id", RUN_ID);
         expect(setOutputMock).toHaveBeenCalledWith("status", "queued");
         expect(setOutputMock).toHaveBeenCalledWith("check-run-id", "12345");
-        expect(setOutputMock).toHaveBeenCalledWith("check-run-url", "https://github.com/Certora/contracts/runs/12345");
-        expect(infoMock).toHaveBeenCalledWith("Server-owned Security Review: https://github.com/Certora/contracts/runs/12345");
-        expect(infoMock).toHaveBeenCalledWith(expect.stringContaining("the separate Security Review check owns the final result"));
+        expect(setOutputMock).toHaveBeenCalledWith(
+          "check-run-url",
+          "https://github.com/Certora/contracts/runs/12345",
+        );
+        expect(infoMock).toHaveBeenCalledWith(
+          "Server-owned Security Review: https://github.com/Certora/contracts/runs/12345",
+        );
+        expect(infoMock).toHaveBeenCalledWith(
+          expect.stringContaining(
+            "the separate Security Review check owns the final result",
+          ),
+        );
         expect(JSON.stringify(infoMock.mock.calls)).not.toMatch(/zeus/i);
         if (workflow === "ai-auditor-full") {
           expect(resolveDiffSourceMock).not.toHaveBeenCalled();
         }
-        for (const name of ["highs-count", "mediums-count", "lows-count", "infos-count"]) {
-          expect(setOutputMock.mock.calls.filter(([output]) => output === name).at(-1)).toEqual([name, ""]);
+        for (const name of [
+          "highs-count",
+          "mediums-count",
+          "lows-count",
+          "infos-count",
+        ]) {
+          expect(
+            setOutputMock.mock.calls
+              .filter(([output]) => output === name)
+              .at(-1),
+          ).toEqual([name, ""]);
         }
       },
     );
@@ -481,31 +551,84 @@ describe("run v2 orchestration", () => {
     it.each([
       ["absent delivery", () => null],
       ["absent check", (delivery: any) => ({ ...delivery, check: undefined })],
-      ["unowned check", (delivery: any) => ({ ...delivery, managed_by: "client" })],
-      ["wrong PR", (delivery: any) => ({ ...delivery, pull_request_number: 43 })],
-      ["wrong head", (delivery: any) => ({ ...delivery, check: { ...delivery.check, head_sha: "c".repeat(40) } })],
-      ["invalid check ID", (delivery: any) => ({ ...delivery, check: { ...delivery.check, id: 0 } })],
-      ["wrong check name", (delivery: any) => ({ ...delivery, check: { ...delivery.check, name: "Unrelated check" } })],
-      ["wrong repository", (delivery: any) => ({ ...delivery, check: { ...delivery.check, html_url: "https://github.com/Other/repo/runs/12345" } })],
-    ])("fails closed for %s without cancelling the accepted audit", async (_label, mutate) => {
-      getConfigMock.mockReturnValue({ ...aiConfig(), waitForCompletion: false });
-      const accepted = managedAuditRun();
-      accepted.delivery = mutate(accepted.delivery);
-      apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: accepted });
+      [
+        "unowned check",
+        (delivery: any) => ({ ...delivery, managed_by: "client" }),
+      ],
+      [
+        "wrong PR",
+        (delivery: any) => ({ ...delivery, pull_request_number: 43 }),
+      ],
+      [
+        "wrong head",
+        (delivery: any) => ({
+          ...delivery,
+          check: { ...delivery.check, head_sha: "c".repeat(40) },
+        }),
+      ],
+      [
+        "invalid check ID",
+        (delivery: any) => ({
+          ...delivery,
+          check: { ...delivery.check, id: 0 },
+        }),
+      ],
+      [
+        "wrong check name",
+        (delivery: any) => ({
+          ...delivery,
+          check: { ...delivery.check, name: "Unrelated check" },
+        }),
+      ],
+      [
+        "wrong repository",
+        (delivery: any) => ({
+          ...delivery,
+          check: {
+            ...delivery.check,
+            html_url: "https://github.com/Other/repo/runs/12345",
+          },
+        }),
+      ],
+    ])(
+      "fails closed for %s without cancelling the accepted audit",
+      async (_label, mutate) => {
+        getConfigMock.mockReturnValue({
+          ...aiConfig(),
+          waitForCompletion: false,
+        });
+        const accepted = managedAuditRun();
+        accepted.delivery = mutate(accepted.delivery);
+        apiMethods.createRun.mockResolvedValue({
+          request_id: "launch",
+          run: accepted,
+        });
 
-      await expect(run()).rejects.toThrow("did not confirm a server-owned Security Review check");
+        await expect(run()).rejects.toThrow(
+          "did not confirm a server-owned Security Review check",
+        );
 
-      expect(setOutputMock).toHaveBeenCalledWith("run-id", RUN_ID);
-      expect(apiMethods.getRun).not.toHaveBeenCalled();
-      expect(apiMethods.cancelRun).not.toHaveBeenCalled();
-      expect(apiMethods.getResult).not.toHaveBeenCalled();
-      expect(setOutputMock).not.toHaveBeenCalledWith("check-run-id", "12345");
-    });
+        expect(setOutputMock).toHaveBeenCalledWith("run-id", RUN_ID);
+        expect(apiMethods.getRun).not.toHaveBeenCalled();
+        expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+        expect(apiMethods.getResult).not.toHaveBeenCalled();
+        expect(setOutputMock).not.toHaveBeenCalledWith("check-run-id", "12345");
+      },
+    );
 
     it("keeps an accepted audit when rerun status refresh fails", async () => {
-      getConfigMock.mockReturnValue({ ...aiConfig(), waitForCompletion: false, githubRunAttempt: 2 });
-      apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: managedAuditRun() });
-      apiMethods.getRun.mockRejectedValue(new Error("Temporary projection failure"));
+      getConfigMock.mockReturnValue({
+        ...aiConfig(),
+        waitForCompletion: false,
+        githubRunAttempt: 2,
+      });
+      apiMethods.createRun.mockResolvedValue({
+        request_id: "launch",
+        run: managedAuditRun(),
+      });
+      apiMethods.getRun.mockRejectedValue(
+        new Error("Temporary projection failure"),
+      );
 
       await expect(run()).rejects.toThrow("Temporary projection failure");
 
@@ -517,8 +640,14 @@ describe("run v2 orchestration", () => {
     it.each(["succeeded", "failed", "cancelled"] as const)(
       "reuses the server's completed check for a recovered %s audit",
       async (status) => {
-        getConfigMock.mockReturnValue({ ...aiConfig(), waitForCompletion: false });
-        apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: managedAuditRun("ai-auditor-diff", status) });
+        getConfigMock.mockReturnValue({
+          ...aiConfig(),
+          waitForCompletion: false,
+        });
+        apiMethods.createRun.mockResolvedValue({
+          request_id: "launch",
+          run: managedAuditRun("ai-auditor-diff", status),
+        });
         await run();
         expect(setFailedMock).not.toHaveBeenCalled();
         expect(apiMethods.getResult).not.toHaveBeenCalled();
@@ -529,12 +658,25 @@ describe("run v2 orchestration", () => {
     );
 
     it("retries a previously failed canonical audit once on an explicit GitHub rerun", async () => {
-      const config = { ...aiConfig(), waitForCompletion: false, githubRunAttempt: 2 };
+      const config = {
+        ...aiConfig(),
+        waitForCompletion: false,
+        githubRunAttempt: 2,
+      };
       getConfigMock.mockReturnValue(config);
       apiMethods.createRun
-        .mockResolvedValueOnce({ request_id: "canonical", run: managedAuditRun() })
-        .mockResolvedValueOnce({ request_id: "retry", run: { ...managedAuditRun(), id: RETRY_RUN_ID } });
-      apiMethods.getRun.mockResolvedValue({ request_id: "refresh", run: managedAuditRun("ai-auditor-diff", "failed") });
+        .mockResolvedValueOnce({
+          request_id: "canonical",
+          run: managedAuditRun(),
+        })
+        .mockResolvedValueOnce({
+          request_id: "retry",
+          run: { ...managedAuditRun(), id: RETRY_RUN_ID },
+        });
+      apiMethods.getRun.mockResolvedValue({
+        request_id: "refresh",
+        run: managedAuditRun("ai-auditor-diff", "failed"),
+      });
 
       await run();
 
@@ -542,7 +684,9 @@ describe("run v2 orchestration", () => {
       expect(apiMethods.getRun).toHaveBeenCalledTimes(1);
       expect(createIdempotencyKeyMock).toHaveBeenLastCalledWith(
         config.workflow,
-        expect.objectContaining({ delivery: expect.objectContaining({ type: "github_pull_request" }) }),
+        expect.objectContaining({
+          delivery: expect.objectContaining({ type: "github_pull_request" }),
+        }),
         `${config.idempotencySeed}:github-rerun-attempt:2`,
       );
       expect(setOutputMock).toHaveBeenCalledWith("run-id", RETRY_RUN_ID);
@@ -550,11 +694,19 @@ describe("run v2 orchestration", () => {
     });
 
     it("does not cancel a handed-off audit when the runner later receives SIGTERM", async () => {
-      getConfigMock.mockReturnValue({ ...aiConfig(), waitForCompletion: false });
-      apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: managedAuditRun() });
+      getConfigMock.mockReturnValue({
+        ...aiConfig(),
+        waitForCompletion: false,
+      });
+      apiMethods.createRun.mockResolvedValue({
+        request_id: "launch",
+        run: managedAuditRun(),
+      });
       await run();
 
-      const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+      const exit = vi
+        .spyOn(process, "exit")
+        .mockImplementation((() => undefined) as never);
       try {
         process.emit("SIGTERM");
         await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(1));
@@ -1579,6 +1731,501 @@ describe("run v2 orchestration", () => {
       HEAD_SHA,
       RUN_ID,
     );
+  });
+
+  describe("independent named configurations", () => {
+    afterEach(() => vi.useRealTimers());
+    const SOURCE_SHA = "a".repeat(40);
+    const SECOND_SHA = "c".repeat(40);
+    const THIRD_SHA = "d".repeat(40);
+    const THIRD_ID = "33333333-3333-4333-8333-333333333333";
+    type Entry = { id: string; sha: string; config: StandaloneActionConfig };
+    function generatedChain(entries: Entry[]) {
+      let parent = SOURCE_SHA;
+      const ancestors = new Map<
+        string,
+        { runId: string; sourceCommitSha: string }
+      >();
+      const runs = new Map<string, Run>();
+      const results = new Map<string, ReturnType<typeof standaloneResult>>();
+      for (const entry of entries) {
+        ancestors.set(entry.sha, { runId: entry.id, sourceCommitSha: parent });
+        const resource = runResource(entry.config.workflow);
+        resource.id = entry.id;
+        resource.source.commit_sha = SOURCE_SHA;
+        resource.client_reference =
+          buildRunRequest({ ...entry.config, headCommitSha: SOURCE_SHA })
+            .client_reference ?? null;
+        resource.delivery = {
+          type: "github_pull_request",
+          pull_request_number: 42,
+          status: "succeeded",
+          outcome: "committed",
+          commit_sha: entry.sha,
+          files: [{ path: `certora/${entry.config.contractName}.spec` }],
+          renamed_files: [],
+          error: null,
+        };
+        runs.set(entry.id, resource);
+        const result = standaloneResult(entry.config.workflow);
+        result.result.run_id = entry.id;
+        result.result.data.contract = {
+          path: entry.config.contractPath,
+          name: entry.config.contractName,
+        };
+        result.result.data.report.contract_name = entry.config.contractName;
+        results.set(entry.id, result);
+        parent = entry.sha;
+      }
+      getGeneratedFollowupMock.mockImplementation(
+        async (sha: string) => ancestors.get(sha) ?? null,
+      );
+      apiMethods.getRun.mockImplementation(async (id: string) => ({
+        request_id: "get",
+        run: runs.get(id),
+      }));
+      apiMethods.getResult.mockImplementation(async (id: string) =>
+        results.get(id),
+      );
+      apiMethods.commitGeneratedFiles.mockImplementation(
+        async (id: string) => ({
+          ...commit,
+          delivery: {
+            ...commit.delivery,
+            commit_sha: entries.find((entry) => entry.id === id)?.sha,
+          },
+        }),
+      );
+      return { ancestors, runs, results, head: parent };
+    }
+    function configurations() {
+      return [
+        { ...standaloneConfig("auto-prover"), configurationId: "prover-vault" },
+        {
+          ...standaloneConfig("auto-prover"),
+          configurationId: "prover-token",
+          contractPath: "src/Token.sol",
+          contractName: "Token",
+        },
+        {
+          ...standaloneConfig("auto-fuzzer"),
+          configurationId: "fuzzer-pool",
+          contractPath: "src/Pool.sol",
+          contractName: "Pool",
+        },
+      ];
+    }
+
+    it("scopes request identity to configuration without exceeding the existing API limit", () => {
+      const config = standaloneConfig("auto-prover");
+      const first = buildRunRequest({ ...config, configurationId: "first" });
+      const second = buildRunRequest({ ...config, configurationId: "second" });
+      expect(first.client_reference).not.toBe(second.client_reference);
+      expect(first.client_reference).toMatch(/:configuration:[0-9a-f]{64}$/);
+      expect(buildRunRequest(config).client_reference).not.toContain(
+        ":configuration:",
+      );
+      const longest = buildRunRequest({
+        ...findingValidationConfig(),
+        prNumber: Number.MAX_SAFE_INTEGER,
+        configurationId: "a".repeat(120),
+      });
+      expect(longest.client_reference!.length).toBeLessThanOrEqual(200);
+    });
+
+    it.each([0, 1, 2])(
+      "recovers configuration %i's own result from an AP1 + AP2 + AF3 generated chain",
+      async (index) => {
+        const configs = configurations();
+        const ids = [RUN_ID, RETRY_RUN_ID, THIRD_ID];
+        const shas = [HEAD_SHA, SECOND_SHA, THIRD_SHA];
+        const fixture = generatedChain(
+          configs.map((config, i) => ({ id: ids[i], sha: shas[i], config })),
+        );
+        getConfigMock.mockReturnValue({
+          ...configs[index],
+          headCommitSha: fixture.head,
+        });
+        await run();
+        expect(apiMethods.createRun).not.toHaveBeenCalled();
+        expect(apiMethods.estimateRun).not.toHaveBeenCalled();
+        expect(setOutputMock).toHaveBeenCalledWith("run-id", ids[index]);
+        expect(setOutputMock).toHaveBeenCalledWith(
+          "generated-commit-sha",
+          shas[index],
+        );
+        expect(upsertPrCommentMock).toHaveBeenCalledWith(
+          42,
+          expect.any(String),
+          expect.any(String),
+          THIRD_SHA,
+          ids[index],
+        );
+        expect(apiMethods.getResult).toHaveBeenCalledExactlyOnceWith(
+          ids[index],
+        );
+        expect(apiMethods.commitGeneratedFiles).toHaveBeenCalledTimes(3);
+      },
+    );
+
+    it("fails closed rather than reusing another named configuration of the same contract or launching again", async () => {
+      const own = {
+        ...standaloneConfig("auto-prover"),
+        configurationId: "vault-a",
+        designDocPath: "docs/a.md",
+      };
+      const sibling = {
+        ...own,
+        configurationId: "vault-b",
+        designDocPath: "docs/b.md",
+      };
+      generatedChain([{ id: RUN_ID, sha: HEAD_SHA, config: sibling }]);
+      getConfigMock.mockReturnValue(own);
+      await expect(run()).rejects.toThrow("No unique result exists");
+      expect(setOutputMock).not.toHaveBeenCalledWith("run-id", RUN_ID);
+      expect(apiMethods.getResult).not.toHaveBeenCalled();
+      expect(apiMethods.createRun).not.toHaveBeenCalled();
+      expect(upsertPrCommentMock).not.toHaveBeenCalled();
+    });
+
+    it.each([true, false])(
+      "does not confuse legacy and named configurations (named invocation=%s)",
+      async (named) => {
+        const legacy = standaloneConfig("auto-prover");
+        const configured = { ...legacy, configurationId: "vault" };
+        generatedChain([
+          { id: RUN_ID, sha: HEAD_SHA, config: named ? legacy : configured },
+        ]);
+        getConfigMock.mockReturnValue(named ? configured : legacy);
+        await expect(run()).rejects.toThrow("No unique result exists");
+        expect(apiMethods.createRun).not.toHaveBeenCalled();
+        expect(apiMethods.getResult).not.toHaveBeenCalled();
+      },
+    );
+
+    function completedNoFiles(config: StandaloneActionConfig): Run {
+      const own = runResource(config.workflow);
+      own.id = THIRD_ID;
+      own.source.commit_sha = SOURCE_SHA;
+      own.client_reference =
+        buildRunRequest({ ...config, headCommitSha: SOURCE_SHA })
+          .client_reference ?? null;
+      own.delivery = {
+        type: "github_pull_request",
+        pull_request_number: 42,
+        status: "succeeded",
+        outcome: "no_changes",
+        commit_sha: null,
+        files: [],
+        renamed_files: [],
+        error: null,
+      };
+      return own;
+    }
+
+    it.each(["verified", "issues_found"])(
+      "recovers its own completed no-files %s outcome using only a bounded GET",
+      async (outcome) => {
+        const [own, sibling] = configurations();
+        generatedChain([{ id: RUN_ID, sha: HEAD_SHA, config: sibling }]);
+        getConfigMock.mockReturnValue(own);
+        const candidate = completedNoFiles(own);
+        apiMethods.findRunsByReference.mockResolvedValue({
+          request_id: "list",
+          runs: [candidate],
+          next_cursor: null,
+        });
+        const result = standaloneResult(own.workflow);
+        result.result.run_id = THIRD_ID;
+        result.result.data.report.outcome = outcome;
+        apiMethods.getResult.mockResolvedValue(result);
+        await run();
+        expect(apiMethods.findRunsByReference).toHaveBeenCalledExactlyOnceWith({
+          workflow: own.workflow,
+          repositoryUrl: own.repositoryUrl,
+          commitSha: SOURCE_SHA,
+          clientReference: candidate.client_reference,
+        });
+        expect(apiMethods.createRun).not.toHaveBeenCalled();
+        expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+        expect(apiMethods.commitGeneratedFiles).toHaveBeenCalledExactlyOnceWith(
+          RUN_ID,
+        );
+        expect(setOutputMock).toHaveBeenCalledWith("run-id", THIRD_ID);
+        expect(setOutputMock).toHaveBeenCalledWith("generated-commit-sha", "");
+        expect(upsertPrCommentMock).toHaveBeenCalledWith(
+          42,
+          expect.any(String),
+          expect.any(String),
+          HEAD_SHA,
+          THIRD_ID,
+        );
+        if (outcome === "issues_found")
+          expect(setFailedMock).toHaveBeenCalledWith(
+            expect.stringContaining("violated properties"),
+          );
+        else expect(setFailedMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      "absent",
+      "ambiguous",
+      "next page",
+      "failed",
+      "wrong source",
+      "wrong engine",
+      "wrong repo",
+      "wrong PR",
+      "wrong config",
+      "unconfirmed delivery",
+      "committed",
+      "commit SHA",
+      "files",
+      "renames",
+    ])(
+      "rejects %s no-files lookup without a launch or unrelated publication",
+      async (kind) => {
+        const [own, sibling] = configurations();
+        generatedChain([{ id: RUN_ID, sha: HEAD_SHA, config: sibling }]);
+        getConfigMock.mockReturnValue(own);
+        const candidate = completedNoFiles(own);
+        if (kind === "failed") candidate.status = "failed";
+        if (kind === "wrong source")
+          candidate.source.commit_sha = "f".repeat(40);
+        if (kind === "wrong engine") candidate.run_type = "auto_fuzzer";
+        if (kind === "wrong repo")
+          candidate.source.repository_url = "https://github.com/other/repo";
+        if (kind === "wrong PR") candidate.delivery!.pull_request_number = 99;
+        if (kind === "wrong config")
+          candidate.client_reference =
+            buildRunRequest({ ...sibling, headCommitSha: SOURCE_SHA })
+              .client_reference ?? null;
+        if (candidate.delivery && !("managed_by" in candidate.delivery)) {
+          if (kind === "unconfirmed delivery")
+            candidate.delivery.status = "failed";
+          if (kind === "committed") candidate.delivery.outcome = "committed";
+          if (kind === "commit SHA") candidate.delivery.commit_sha = HEAD_SHA;
+          if (kind === "files")
+            candidate.delivery.files = [{ path: "certora/Vault.spec" }];
+          if (kind === "renames")
+            candidate.delivery.renamed_files = [{ from: "a", to: "b" }];
+        }
+        apiMethods.findRunsByReference.mockResolvedValue({
+          request_id: "list",
+          runs:
+            kind === "absent"
+              ? []
+              : kind === "ambiguous"
+                ? [candidate, candidate]
+                : [candidate],
+          next_cursor: kind === "next page" ? RUN_ID : null,
+        });
+        await expect(run()).rejects.toThrow();
+        expect(apiMethods.createRun).not.toHaveBeenCalled();
+        expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+        expect(apiMethods.getResult).not.toHaveBeenCalled();
+        expect(upsertPrCommentMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it("waits read-only for the unique original run and no-files delivery, preserving its failing outcome", async () => {
+      vi.useFakeTimers();
+      const [own, sibling] = configurations();
+      const fixture = generatedChain([
+        { id: RUN_ID, sha: HEAD_SHA, config: sibling },
+      ]);
+      getConfigMock.mockReturnValue(own);
+      const pending = completedNoFiles(own);
+      pending.status = "running";
+      const finished = completedNoFiles(own);
+      const deliveryPending = completedNoFiles(own);
+      deliveryPending.delivery!.status = "pending";
+      apiMethods.findRunsByReference.mockResolvedValue({
+        request_id: "list",
+        runs: [pending],
+        next_cursor: null,
+      });
+      apiMethods.getRun
+        .mockResolvedValueOnce({ run: fixture.runs.get(RUN_ID) })
+        .mockResolvedValueOnce({ run: deliveryPending })
+        .mockResolvedValueOnce({ run: finished });
+      const result = standaloneResult(own.workflow);
+      result.result.run_id = THIRD_ID;
+      result.result.data.report.outcome = "issues_found";
+      apiMethods.getResult.mockResolvedValue(result);
+      const task = run();
+      await vi.advanceTimersByTimeAsync(2000);
+      await task;
+      expect(apiMethods.getRun).toHaveBeenNthCalledWith(2, THIRD_ID);
+      expect(apiMethods.getRun).toHaveBeenNthCalledWith(3, THIRD_ID);
+      expect(setFailedMock).toHaveBeenCalledWith(
+        expect.stringContaining("violated properties"),
+      );
+      expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+      expect(apiMethods.createRun).not.toHaveBeenCalled();
+      expect(apiMethods.commitGeneratedFiles).toHaveBeenCalledExactlyOnceWith(
+        RUN_ID,
+      );
+    });
+
+    it.each(["timeout", "read failure", "identity change"])(
+      "fails closed on original-run polling %s without cancelling or launching",
+      async (kind) => {
+        vi.useFakeTimers();
+        const [own, sibling] = configurations();
+        const fixture = generatedChain([
+          { id: RUN_ID, sha: HEAD_SHA, config: sibling },
+        ]);
+        getConfigMock.mockReturnValue({
+          ...own,
+          timeout: kind === "timeout" ? 1 / 60 : 1,
+        });
+        const candidate = completedNoFiles(own);
+        candidate.status = "running";
+        apiMethods.findRunsByReference.mockResolvedValue({
+          request_id: "list",
+          runs: [candidate],
+          next_cursor: null,
+        });
+        apiMethods.getRun.mockResolvedValueOnce({
+          run: fixture.runs.get(RUN_ID),
+        });
+        if (kind === "read failure")
+          apiMethods.getRun.mockRejectedValueOnce(new Error("read failed"));
+        if (kind === "identity change")
+          apiMethods.getRun.mockResolvedValueOnce({
+            run: { ...candidate, client_reference: "another-configuration" },
+          });
+        const assertion = expect(run()).rejects.toThrow(
+          kind === "timeout"
+            ? "It was not cancelled"
+            : kind === "read failure"
+              ? "read failed"
+              : "different source",
+        );
+        await vi.advanceTimersByTimeAsync(1000);
+        await assertion;
+        expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+        expect(apiMethods.createRun).not.toHaveBeenCalled();
+        expect(apiMethods.getResult).not.toHaveBeenCalled();
+        expect(upsertPrCommentMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["contract", "backend"])(
+      "rejects an unrelated no-files report %s",
+      async (kind) => {
+        const [own, sibling] = configurations();
+        generatedChain([{ id: RUN_ID, sha: HEAD_SHA, config: sibling }]);
+        getConfigMock.mockReturnValue(own);
+        apiMethods.findRunsByReference.mockResolvedValue({
+          request_id: "list",
+          runs: [completedNoFiles(own)],
+          next_cursor: null,
+        });
+        const result = standaloneResult(own.workflow);
+        result.result.run_id = THIRD_ID;
+        if (kind === "contract")
+          result.result.data.contract.path = "src/Other.sol";
+        else result.result.data.report.backend = "foundry";
+        apiMethods.getResult.mockResolvedValue(result);
+        await expect(run()).rejects.toThrow();
+        expect(apiMethods.createRun).not.toHaveBeenCalled();
+        expect(upsertPrCommentMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it("rejects a changed contract under the same named configuration before delivery", async () => {
+      const own = {
+        ...standaloneConfig("auto-prover"),
+        configurationId: "vault",
+      };
+      generatedChain([
+        {
+          id: RUN_ID,
+          sha: HEAD_SHA,
+          config: { ...own, contractName: "Other" },
+        },
+      ]);
+      getConfigMock.mockReturnValue(own);
+      await expect(run()).rejects.toThrow("different contract");
+      expect(apiMethods.commitGeneratedFiles).not.toHaveBeenCalled();
+      expect(apiMethods.createRun).not.toHaveBeenCalled();
+    });
+
+    it("rejects an unattested contributor commit between generated commits", async () => {
+      const [own, sibling] = configurations();
+      const fixture = generatedChain([
+        { id: RUN_ID, sha: HEAD_SHA, config: own },
+        { id: RETRY_RUN_ID, sha: SECOND_SHA, config: sibling },
+      ]);
+      fixture.ancestors.delete(HEAD_SHA);
+      getConfigMock.mockReturnValue({ ...own, headCommitSha: SECOND_SHA });
+      await expect(run()).rejects.toThrow("unverified contributor commit");
+      expect(apiMethods.createRun).not.toHaveBeenCalled();
+      expect(upsertPrCommentMock).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      "different source",
+      "different repository",
+      "different PR",
+      "forged delivery",
+      "unconfirmed delivery",
+      "invalid identity",
+    ])(
+      "rejects sibling %s without falsely skipping or relaunching",
+      async (kind) => {
+        const [own, sibling] = configurations();
+        const fixture = generatedChain([
+          { id: RUN_ID, sha: HEAD_SHA, config: own },
+          { id: RETRY_RUN_ID, sha: SECOND_SHA, config: sibling },
+        ]);
+        const candidate = fixture.runs.get(RUN_ID)!;
+        if (kind === "different source")
+          candidate.source.commit_sha = "f".repeat(40);
+        if (kind === "different repository")
+          candidate.source.repository_url = "https://github.com/other/repo";
+        if (kind === "different PR")
+          candidate.delivery!.pull_request_number = 99;
+        if (
+          kind === "forged delivery" &&
+          candidate.delivery &&
+          !("managed_by" in candidate.delivery)
+        )
+          candidate.delivery.commit_sha = "f".repeat(40);
+        if (kind === "unconfirmed delivery") candidate.status = "running";
+        if (kind === "invalid identity")
+          candidate.client_reference = "other-client";
+        getConfigMock.mockReturnValue({
+          ...sibling,
+          headCommitSha: SECOND_SHA,
+        });
+        await expect(run()).rejects.toThrow();
+        expect(apiMethods.createRun).not.toHaveBeenCalled();
+        expect(upsertPrCommentMock).not.toHaveBeenCalled();
+        expect(setOutputMock).not.toHaveBeenCalledWith("status", "skipped");
+      },
+    );
+
+    it("bounds generated ancestry and never starts a run on overflow", async () => {
+      const own = {
+        ...standaloneConfig("auto-prover"),
+        configurationId: "own",
+      };
+      const fixture = generatedChain(
+        Array.from({ length: 17 }, (_, index) => ({
+          id: `${String(index).padStart(8, "0")}-aaaa-aaaa-aaaa-aaaaaaaaaaaa`,
+          sha: (index + 1).toString(16).padStart(40, "0"),
+          config: { ...own, configurationId: `sibling-${index}` },
+        })),
+      );
+      getConfigMock.mockReturnValue({ ...own, headCommitSha: fixture.head });
+      await expect(run()).rejects.toThrow("exceeds 16 commits");
+      expect(apiMethods.getRun).toHaveBeenCalledTimes(16);
+      expect(apiMethods.createRun).not.toHaveBeenCalled();
+    });
   });
 
   describe.each(["auto-prover", "auto-fuzzer"] as const)(

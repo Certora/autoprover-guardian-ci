@@ -16,6 +16,10 @@ inputs:
     required: false
     default: "ai-auditor-diff"
 
+  configuration-id:
+    description: "Optional stable identity for this installed configuration (1-120 lowercase letters, digits, or hyphens). Use distinct IDs for parallel engine/contract/settings configurations."
+    required: false
+
   model-mode:
     description: 'AI Auditor only (full, diff, and finding validation): model set "normal" or "frontier". Empty uses the server default, Normal; does not change max-iterations.'
     required: false

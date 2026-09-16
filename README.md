@@ -294,6 +294,32 @@ arrays are rejected rather than silently changing the audit selection.
 
 `threat-model-path` is supported only by AutoProver.
 
+## Independent configurations
+
+Multiple workflow files can run AI Auditor, AutoProver for several contracts,
+and AutoFuzzer on the same PR. Give each installation a distinct, stable
+`configuration-id` (up to 120 lowercase letters, digits, or hyphens, starting
+with a letter or digit). Different settings for the same contract also need
+different IDs. The ID scopes launch/recovery identity; it does not change the
+selected engine or contract. Omitted IDs preserve legacy request identity and
+are never treated as a match for a named configuration.
+
+Use distinct workflow/job names and concurrency groups. For AutoProver and
+AutoFuzzer, include both the configuration and PR head SHA in the concurrency
+group: a sibling's generated push must not cancel the original paid run.
+For example, `guardian-vault-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}`.
+
+Parallel generated deliveries append to a verified chain from the original
+source. The server verifies each sibling's complete additions-only output,
+preserves existing files using collision-safe filenames, and atomically checks
+the branch head before committing. Contributor changes, modified files,
+unverified trailers, and chains longer than 16 commits fail closed. Independent
+installations are not capped, but automatic delivery is limited to 16 generated
+artifact commits from the same audited source; additional artifacts remain
+available in the dashboard. A busy
+branch may require retrying delivery for the original run; do not launch a new
+paid run just to retry generated-file delivery.
+
 ## Generated-commit follow-up
 
 Generated commits end with this exact trailer:
@@ -303,9 +329,15 @@ Certora-Guardian-Run: <UUID>
 ```
 
 When GitHub runs Guardian again for that commit, the action validates the
-trailer against the canonical run, result, workflow, contract, delivery, and
-current pull-request head. It reports the original outcome without launching
-or billing another run. If the generated commit was pushed before its delivery
+generated ancestry against canonical runs and their exact delivery commits.
+It recovers only its own configuration, engine, and contract, even when a
+sibling's generated commit is above it. When this configuration has no generated
+commit, a bounded read-only lookup can recover its unique completed no-files
+result, including a failing outcome. A unique still-running original run is
+polled read-only within this invocation's timeout; the follow-up never launches
+or cancels that run. Missing, ambiguous, unverified, or timed-out results fail
+closed: no passing result is claimed and no new paid run is launched. Inspect
+the original run and retry the follow-up after it finishes if needed. If the generated commit was pushed before its delivery
 status could be saved, the follow-up recovers delivery for that same run without
 starting a second paid run. Text that does not match this exact trailer is ignored.
 
@@ -384,6 +416,7 @@ errors, so correcting the repository access or path and rerunning is safe.
 | ------------------- | ------------------ | ------------------------- | ------------------------------------------------------ |
 | `api-key`           | Yes                | —                         | Certora organization API key                           |
 | `workflow`          | No                 | `ai-auditor-diff`         | One of the five workflows listed above                 |
+| `configuration-id`  | No                 | Empty (legacy identity)  | Stable distinct ID for each installed configuration    |
 | `model-mode`        | No                 | Empty (Normal)           | AI Auditor model set: `normal` or `frontier`             |
 | `context`           | No                 | Empty (automatic)         | Optional AI Auditor context override; server selects context when empty |
 | `finding`           | Finding validation | —                         | Finding description to validate, up to 8000 characters |

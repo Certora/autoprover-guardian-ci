@@ -1,4 +1,5 @@
 import * as core from "@actions/core";
+import { createHash } from "node:crypto";
 import { formatProgressPhase, formatRunFailure } from "./automatic-context";
 import {
   AutoProverApi,
@@ -22,6 +23,7 @@ import type {
   AiAuditorGithubDeliveryRequest,
   AissRunReport,
   AuditFindings,
+  CommitGeneratedFilesResponse,
   Finding,
   FindingValidationActionConfig,
   FindingValidationModelVerdict,
@@ -42,6 +44,7 @@ import {
   MAX_CONSECUTIVE_POLL_FAILURES,
   modelModeLabel,
   prCommentMarker,
+  SHA_REGEX,
   SHUTDOWN_CANCEL_TIMEOUT_MS,
 } from "./constants";
 
@@ -120,9 +123,12 @@ function isFindingValidationConfig(
   return config.workflow === "ai-auditor-finding-validation";
 }
 
-function isAsyncAuditConfig(config: ActionConfig): config is AiAuditorActionConfig {
+function isAsyncAuditConfig(
+  config: ActionConfig,
+): config is AiAuditorActionConfig {
   return (
-    (config.workflow === "ai-auditor-full" || config.workflow === "ai-auditor-diff") &&
+    (config.workflow === "ai-auditor-full" ||
+      config.workflow === "ai-auditor-diff") &&
     !config.waitForCompletion
   );
 }
@@ -142,6 +148,12 @@ function aiAuditorDelivery(
   };
 }
 
+function configurationReferenceId(config: ActionConfig): string | undefined {
+  return config.configurationId === undefined
+    ? undefined
+    : createHash("sha256").update(config.configurationId).digest("hex");
+}
+
 function clientReference(
   config: ActionConfig,
   sourceCommitSha = config.headCommitSha,
@@ -151,6 +163,9 @@ function clientReference(
     `pr-${config.prNumber}`,
     sourceCommitSha,
     config.workflow,
+    ...(config.configurationId
+      ? ["configuration", configurationReferenceId(config)]
+      : []),
   ].join(":");
 }
 
@@ -173,7 +188,9 @@ export function buildRunRequest(config: ActionConfig): RunRequest {
       instructions: config.instructions,
       skip_submodules: config.skipSubmodules,
       max_iterations: config.maxIterations,
-      ...(config.waitForCompletion ? {} : { delivery: aiAuditorDelivery(config) }),
+      ...(config.waitForCompletion
+        ? {}
+        : { delivery: aiAuditorDelivery(config) }),
       client_reference: reference,
     };
   }
@@ -194,7 +211,9 @@ export function buildRunRequest(config: ActionConfig): RunRequest {
       use_memory: config.useMemory,
       skip_submodules: config.skipSubmodules,
       max_iterations: config.maxIterations,
-      ...(config.waitForCompletion ? {} : { delivery: aiAuditorDelivery(config) }),
+      ...(config.waitForCompletion
+        ? {}
+        : { delivery: aiAuditorDelivery(config) }),
       client_reference: reference,
     };
   }
@@ -487,6 +506,7 @@ function validateRunIdentity(
   config: ActionConfig,
   expectedRunId: string,
   expectedSourceCommitSha = config.headCommitSha,
+  expectedReference = clientReference(config, expectedSourceCommitSha),
 ): void {
   const expectedCommit = expectedSourceCommitSha.toLowerCase();
   const actualCommit =
@@ -504,7 +524,7 @@ function validateRunIdentity(
       config.repositoryUrl.toLowerCase() ||
     actualCommit?.toLowerCase() !== expectedCommit ||
     !baseCommitMatches ||
-    run.client_reference !== clientReference(config, expectedSourceCommitSha)
+    run.client_reference !== expectedReference
   ) {
     throw new Error("Certora returned a run for a different source.");
   }
@@ -536,9 +556,9 @@ function validateAsyncDelivery(
     !isServerManagedGithubDelivery(delivery) ||
     delivery.pull_request_number !== config.prNumber ||
     delivery.check.head_sha !== config.headCommitSha ||
-    !new URL(delivery.check.html_url).pathname.toLowerCase().startsWith(
-      `${new URL(config.repositoryUrl).pathname.toLowerCase()}/`,
-    )
+    !new URL(delivery.check.html_url).pathname
+      .toLowerCase()
+      .startsWith(`${new URL(config.repositoryUrl).pathname.toLowerCase()}/`)
   ) {
     throw new Error(
       `Certora accepted run ${run.id}, but did not confirm a server-owned ${AI_AUDITOR_CHECK_NAME} check for this pull request and head commit. The run has not been cancelled. Rerun with the same inputs and API key to recover it; do not change inputs to work around a missing handoff.`,
@@ -551,7 +571,9 @@ function publishAsyncHandoff(run: Run, config: AiAuditorActionConfig): void {
   const delivery = validateAsyncDelivery(run, config);
   core.setOutput("check-run-id", String(delivery.check.id));
   core.setOutput("check-run-url", delivery.check.html_url);
-  core.info(`Server-owned ${AI_AUDITOR_CHECK_NAME}: ${delivery.check.html_url}`);
+  core.info(
+    `Server-owned ${AI_AUDITOR_CHECK_NAME}: ${delivery.check.html_url}`,
+  );
   core.info(`Audit dashboard: ${run.dashboard_url}`);
   core.info(
     `Audit handoff confirmed. This workflow confirms launch, not a clean audit; the separate ${AI_AUDITOR_CHECK_NAME} check owns the final result and fail-on policy. No runner-side cancellation or result publishing will follow.`,
@@ -612,24 +634,16 @@ function registerShutdownHandlers(): void {
   process.on("SIGINT", () => void handler("SIGINT"));
 }
 
-async function publishStandaloneResult(args: {
-  api: AutoProverApi;
-  config: StandaloneActionConfig;
-  ghClient: GitHubClient;
-  run: Run;
-  runId: string;
-  requireCommitSha?: string;
-}): Promise<void> {
-  const { api, config, ghClient, run, runId, requireCommitSha } = args;
-  const resultResponse = await api.getResult(runId);
-  validateResultIdentity(resultResponse.result, runId, config);
-  if (
-    resultResponse.result.run_type !== "auto_prover" &&
-    resultResponse.result.run_type !== "auto_fuzzer"
-  ) {
+function standaloneReport(
+  result: RunResult,
+  runId: string,
+  config: StandaloneActionConfig,
+): AissRunReport {
+  validateResultIdentity(result, runId, config);
+  if (result.run_type !== "auto_prover" && result.run_type !== "auto_fuzzer") {
     throw new Error("Standalone workflow returned an AI Auditor result.");
   }
-  const report = readStandaloneReport(resultResponse.result.data.report);
+  const report = readStandaloneReport(result.data.report);
   if (report.contract_name !== config.contractName) {
     throw new Error(
       "Standalone workflow returned a report for a different contract.",
@@ -642,7 +656,32 @@ async function publishStandaloneResult(args: {
       "Standalone workflow returned a report from a different backend.",
     );
   }
-  const commit = await api.commitGeneratedFiles(runId);
+  return report;
+}
+
+async function publishStandaloneResult(args: {
+  api: AutoProverApi;
+  config: StandaloneActionConfig;
+  ghClient: GitHubClient;
+  run: Run;
+  runId: string;
+  requireCommitSha?: string;
+  summaryHeadSha?: string;
+  prepared?: { result: RunResult; commit: CommitGeneratedFilesResponse };
+}): Promise<void> {
+  const {
+    api,
+    config,
+    ghClient,
+    run,
+    runId,
+    requireCommitSha,
+    summaryHeadSha,
+  } = args;
+  const result = args.prepared?.result ?? (await api.getResult(runId)).result;
+  const report = standaloneReport(result, runId, config);
+  const commit =
+    args.prepared?.commit ?? (await api.commitGeneratedFiles(runId));
   if (
     !requireCommitSha &&
     commit.delivery.status === "committed" &&
@@ -695,7 +734,7 @@ async function publishStandaloneResult(args: {
         commit,
       }),
       prCommentMarker(config.workflow),
-      commit.delivery.commit_sha ?? config.headCommitSha,
+      summaryHeadSha ?? commit.delivery.commit_sha ?? config.headCommitSha,
       runId,
     );
   }
@@ -715,59 +754,232 @@ async function tryGeneratedFollowup(
   ghClient: GitHubClient,
   deadlineMs: number,
 ): Promise<boolean> {
-  const followup = await ghClient.getGeneratedFollowup(config.headCommitSha);
-  if (!followup) return false;
-
-  const response = await api.getRun(followup.runId);
-  validateRunIdentity(
-    response.run,
-    config,
-    followup.runId,
-    followup.sourceCommitSha,
+  let followup = await ghClient.getGeneratedFollowup(
+    config.headCommitSha,
+    deadlineMs,
   );
-  const delivery = response.run.delivery;
-  if (delivery && "managed_by" in delivery) {
-    throw new Error(
-      "Certora returned an audit check instead of generated-file delivery.",
+  if (!followup) return false;
+  let commitSha = config.headCommitSha;
+  let sourceSha: string | undefined;
+  let matched:
+    | {
+        run: Run;
+        commitSha: string;
+        result: RunResult;
+        commit: CommitGeneratedFilesResponse;
+      }
+    | undefined;
+  const seenRuns = new Set<string>();
+  const recoveryApi = completionApi(config, deadlineMs);
+  // A generated push triggers every installed configuration. Attest the whole
+  // generated-only chain, then recover this configuration's own result (which
+  // may be below another configuration's commit), never the top trailer alone.
+  for (let depth = 0; ; depth++) {
+    if (depth >= 16 || seenRuns.has(followup.runId)) {
+      throw new Error(
+        "Generated follow-up ancestry is cyclic or exceeds 16 commits.",
+      );
+    }
+    if (Date.now() >= deadlineMs) throw new AutoProverApiDeadlineError();
+    seenRuns.add(followup.runId);
+    const response = await api.getRun(followup.runId);
+    const candidate = response.run;
+    const workflow =
+      candidate.run_type === "auto_prover"
+        ? "auto-prover"
+        : candidate.run_type === "auto_fuzzer"
+          ? "auto-fuzzer"
+          : undefined;
+    const candidateSource = candidate.source.commit_sha;
+    if (!workflow || !candidateSource || !SHA_REGEX.test(candidateSource)) {
+      throw new Error(
+        "Generated follow-up references an incompatible Certora run.",
+      );
+    }
+    sourceSha ??= candidateSource.toLowerCase();
+    if (candidateSource.toLowerCase() !== sourceSha) {
+      throw new Error(
+        "Generated follow-up contains runs from different source commits.",
+      );
+    }
+    const legacyReference = clientReference(
+      { ...config, workflow, configurationId: undefined },
+      sourceSha,
     );
-  }
-  const completedForHead =
-    delivery?.status === "succeeded" &&
-    delivery.outcome === "committed" &&
-    delivery.commit_sha?.toLowerCase() === config.headCommitSha.toLowerCase();
-  // The GitHub push precedes the server's durable delivery completion. A
-  // follow-up can arrive while that write is pending, or after an ambiguous
-  // failure. Let the same run's replay-safe delivery endpoint reconcile the
-  // exact generated child (parent, files, hashes and modes) in those states.
-  // Contradictory completed delivery metadata must still fail closed.
-  const needsDeliveryRecovery =
-    (delivery?.status === "pending" || delivery?.status === "failed") &&
-    delivery.outcome === null &&
-    delivery.commit_sha === null;
-  if (
-    response.run.status !== "succeeded" ||
-    (!completedForHead && !needsDeliveryRecovery)
-  ) {
-    throw new Error(
-      "Generated follow-up references an incompatible Certora run.",
+    const reference = candidate.client_reference;
+    let configurationId: string | undefined;
+    if (reference !== legacyReference) {
+      const prefix = `${legacyReference}:configuration:`;
+      configurationId = reference?.startsWith(prefix)
+        ? reference.slice(prefix.length)
+        : undefined;
+      if (!configurationId || !/^[0-9a-f]{64}$/.test(configurationId)) {
+        throw new Error(
+          "Certora returned a run for a different source or configuration.",
+        );
+      }
+    }
+    validateRunIdentity(
+      candidate,
+      { ...config, workflow },
+      followup.runId,
+      sourceSha,
+      reference ?? undefined,
     );
+    const delivery = candidate.delivery;
+    if (delivery && "managed_by" in delivery) {
+      throw new Error(
+        "Certora returned an audit check instead of generated-file delivery.",
+      );
+    }
+    const completedForHead =
+      delivery?.status === "succeeded" &&
+      delivery.outcome === "committed" &&
+      delivery.commit_sha?.toLowerCase() === commitSha.toLowerCase();
+    const needsDeliveryRecovery =
+      (delivery?.status === "pending" || delivery?.status === "failed") &&
+      delivery.outcome === null &&
+      delivery.commit_sha === null;
+    if (
+      candidate.status !== "succeeded" ||
+      (!completedForHead && !needsDeliveryRecovery)
+    ) {
+      throw new Error(
+        "Generated follow-up references an incompatible Certora run.",
+      );
+    }
+    const isOwnConfiguration =
+      workflow === config.workflow &&
+      configurationId === configurationReferenceId(config);
+    let ownResult: RunResult | undefined;
+    if (isOwnConfiguration) {
+      // A configured identity may not silently change contracts. Legacy
+      // workflows retain their existing strict engine+contract validation.
+      ownResult = (await recoveryApi.getResult(candidate.id)).result;
+      standaloneReport(ownResult, candidate.id, config);
+    }
+    if (needsDeliveryRecovery) {
+      core.info(
+        `Recovering generated-file delivery for Certora run ${followup.runId}.`,
+      );
+    }
+    const committed = await recoveryApi.commitGeneratedFiles(candidate.id);
+    if (
+      committed.delivery.status !== "committed" ||
+      committed.delivery.commit_sha?.toLowerCase() !== commitSha.toLowerCase()
+    ) {
+      throw new Error(
+        `Generated follow-up commit mismatch: expected ${commitSha}, received ${committed.delivery.commit_sha ?? "none"}.`,
+      );
+    }
+    if (ownResult && !matched)
+      matched = {
+        run: candidate,
+        commitSha,
+        result: ownResult,
+        commit: committed,
+      };
+    const parent = followup.sourceCommitSha.toLowerCase();
+    if (parent === sourceSha) break;
+    commitSha = parent;
+    followup = await ghClient.getGeneratedFollowup(parent, deadlineMs);
+    if (!followup) {
+      throw new Error(
+        "Generated follow-up ancestry contains an unverified contributor commit.",
+      );
+    }
   }
-  if (needsDeliveryRecovery) {
-    core.info(
-      `Recovering generated-file delivery for Certora run ${followup.runId}.`,
-    );
+  if (matched) {
+    await publishStandaloneResult({
+      api: recoveryApi,
+      config,
+      ghClient,
+      run: matched.run,
+      runId: matched.run.id,
+      requireCommitSha: matched.commitSha,
+      summaryHeadSha: config.headCommitSha,
+      prepared: { result: matched.result, commit: matched.commit },
+    });
+  } else {
+    // A sibling-only chain is not a passing result for this configuration.
+    // Its own run may have produced no files (including a failing report), so
+    // recover only one exact no-files result by read-only lookup/polling. Never
+    // invent an original workflow-run idempotency key or start a replacement.
+    const candidates = await api.findRunsByReference({
+      workflow: config.workflow,
+      repositoryUrl: config.repositoryUrl,
+      commitSha: sourceSha,
+      clientReference: clientReference(config, sourceSha),
+    });
+    if (candidates.runs.length !== 1 || candidates.next_cursor !== null) {
+      throw new Error(
+        "No unique result exists for this configuration at the original source. No new run was launched; inspect the original run and retry this workflow after it completes.",
+      );
+    }
+    let own = candidates.runs[0];
+    const ownRunId = own.id;
+    validateRunIdentity(own, config, ownRunId, sourceSha);
+    // Do not reuse pollRun: its timeout/failure branches may cancel a run.
+    // This run belongs to the original source workflow, not this follow-up.
+    // activeRun remains null throughout, including during SIGTERM handling.
+    while (
+      ["queued", "running", "finalizing", "cancelling"].includes(own.status) ||
+      (own.status === "succeeded" && own.delivery?.status === "pending")
+    ) {
+      const remaining = deadlineMs - Date.now();
+      if (remaining <= 0)
+        throw new Error(
+          "Timed out waiting for this configuration's original run and delivery. It was not cancelled and no new run was launched. Retry this follow-up workflow after the original run completes.",
+        );
+      core.info(
+        `Waiting for original configuration run ${ownRunId}; no new launch or cancellation will be sent.`,
+      );
+      await sleep(Math.min(config.pollInterval * 1000, remaining));
+      if (Date.now() >= deadlineMs)
+        throw new Error(
+          "Timed out waiting for this configuration's original run and delivery. It was not cancelled and no new run was launched. Retry this follow-up workflow after the original run completes.",
+        );
+      own = (await api.getRun(ownRunId)).run;
+      validateRunIdentity(own, config, ownRunId, sourceSha);
+    }
+    const delivery = own.delivery;
+    if (
+      own.status !== "succeeded" ||
+      !delivery ||
+      "managed_by" in delivery ||
+      delivery.status !== "succeeded" ||
+      delivery.outcome !== "no_changes" ||
+      delivery.commit_sha !== null ||
+      delivery.files.length !== 0 ||
+      delivery.renamed_files.length !== 0
+    ) {
+      throw new Error(
+        "This configuration has no verified completed no-files result. Its original run may still be running or require delivery. No new run was launched; inspect the original run and retry this workflow after it completes.",
+      );
+    }
+    const result = (await recoveryApi.getResult(own.id)).result;
+    standaloneReport(result, own.id, config);
+    await publishStandaloneResult({
+      api: recoveryApi,
+      config,
+      ghClient,
+      run: own,
+      runId: own.id,
+      summaryHeadSha: config.headCommitSha,
+      prepared: {
+        result,
+        commit: {
+          request_id: candidates.request_id,
+          delivery: {
+            status: "no_changes",
+            commit_sha: null,
+            files: [],
+            renamed_files: [],
+          },
+        },
+      },
+    });
   }
-  // Result/contract validation still runs before delivery, and the endpoint's
-  // returned commit must equal this event's head before anything is published.
-  // Server Retry-After lease waits share this finite completion deadline.
-  await publishStandaloneResult({
-    api: completionApi(config, deadlineMs),
-    config,
-    ghClient,
-    run: response.run,
-    runId: followup.runId,
-    requireCommitSha: config.headCommitSha,
-  });
   return true;
 }
 
@@ -1064,16 +1276,21 @@ export async function run(): Promise<void> {
     eventConfig.workflow === "ai-auditor-diff"
       ? {
           ...eventConfig,
-          ...(await new GitHubClient(eventConfig.githubToken).resolveDiffSource({
-            ...eventConfig,
-            deadlineMs,
-          })),
+          ...(await new GitHubClient(eventConfig.githubToken).resolveDiffSource(
+            {
+              ...eventConfig,
+              deadlineMs,
+            },
+          )),
         }
       : eventConfig;
   const asyncAudit = isAsyncAuditConfig(config);
   if (asyncAudit) {
     for (const output of [
-      "highs-count", "mediums-count", "lows-count", "infos-count",
+      "highs-count",
+      "mediums-count",
+      "lows-count",
+      "infos-count",
     ]) {
       core.setOutput(output, "");
     }
@@ -1112,9 +1329,10 @@ export async function run(): Promise<void> {
   validateRunIdentity(currentRun, config, currentRunId);
   // Preserve the accepted run reference even if refreshing its status fails.
   core.setOutput("run-id", currentRunId);
-  activeRun = !asyncAudit && currentRun.cancellable
-    ? { api, runId: currentRunId, config }
-    : null;
+  activeRun =
+    !asyncAudit && currentRun.cancellable
+      ? { api, runId: currentRunId, config }
+      : null;
   if (config.githubRunAttempt > 1) {
     // A completed idempotency record replays the original launch response,
     // usually queued. Only a fresh resource can decide whether this GitHub

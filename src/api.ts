@@ -6,10 +6,12 @@ import type {
   EstimateResponse,
   ProblemDetails,
   RunRequest,
+  RunListResponse,
   RunResponse,
   RunResultResponse,
   Workflow,
 } from "./types";
+import { workflowRunType } from "./types";
 import {
   API_REQUEST_TIMEOUT_MS,
   MAX_RETRY_ATTEMPTS,
@@ -230,9 +232,11 @@ function isRunDelivery(value: unknown): boolean {
     typeof value.status === "string" &&
     DELIVERY_STATUSES.has(value.status) &&
     (value.outcome === null ||
-      (typeof value.outcome === "string" && DELIVERY_OUTCOMES.has(value.outcome))) &&
+      (typeof value.outcome === "string" &&
+        DELIVERY_OUTCOMES.has(value.outcome))) &&
     (value.commit_sha === null ||
-      (typeof value.commit_sha === "string" && SHA_REGEX.test(value.commit_sha))) &&
+      (typeof value.commit_sha === "string" &&
+        SHA_REGEX.test(value.commit_sha))) &&
     Array.isArray(value.files) &&
     value.files.every(isDeliveryFile) &&
     Array.isArray(value.renamed_files) &&
@@ -610,6 +614,47 @@ export class AutoProverApi {
         deadlineMs ?? this.deadlineMs,
       ),
     );
+  }
+
+  /** Read-only, deliberately limited to two results so ambiguous recovery fails closed. */
+  async findRunsByReference(args: {
+    workflow: Workflow;
+    repositoryUrl: string;
+    commitSha: string;
+    clientReference: string;
+  }): Promise<RunListResponse> {
+    const query = new URLSearchParams({
+      run_type: workflowRunType(args.workflow),
+      repository_url: args.repositoryUrl,
+      commit_sha: args.commitSha,
+      client_reference: args.clientReference,
+      limit: "2",
+    });
+    const envelope = requestEnvelope(
+      await request<unknown>(
+        `${this.baseUrl}/v2/runs?${query}`,
+        this.apiKey,
+        {},
+        MAX_RETRY_ATTEMPTS,
+        this.deadlineMs,
+      ),
+    );
+    if (
+      !Array.isArray(envelope.runs) ||
+      envelope.runs.length > 2 ||
+      (envelope.next_cursor !== null &&
+        (typeof envelope.next_cursor !== "string" ||
+          !UUID_REGEX.test(envelope.next_cursor)))
+    ) {
+      invalidResponse("malformed run list");
+    }
+    return {
+      request_id: envelope.request_id as string,
+      runs: envelope.runs.map(
+        (run) => decodeRun({ request_id: envelope.request_id, run }).run,
+      ),
+      next_cursor: envelope.next_cursor as string | null,
+    };
   }
 
   async getResult(
