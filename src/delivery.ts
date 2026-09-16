@@ -1,4 +1,4 @@
-import { SHA_REGEX } from "./constants";
+import { AI_AUDITOR_CHECK_NAME, SHA_REGEX } from "./constants";
 import type { ServerManagedGithubDelivery } from "./types";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -19,7 +19,10 @@ export function isServerManagedGithubDelivery(
     !["pending", "in_progress", "completed"].includes(String(value.status)) ||
     !Number.isSafeInteger(check.id) ||
     (check.id as number) <= 0 ||
-    check.name !== "Zeus AI Audit" ||
+    // Older servers and persisted runs retain this exact legacy check name.
+    (check.name !== AI_AUDITOR_CHECK_NAME &&
+      check.name !== "AI Auditor" &&
+      check.name !== "Zeus AI Audit") ||
     typeof check.head_sha !== "string" ||
     !SHA_REGEX.test(check.head_sha) ||
     !["in_progress", "completed"].includes(String(check.status)) ||

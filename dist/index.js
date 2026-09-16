@@ -32038,6 +32038,8 @@ function getAutoProverApiErrorMessage(error) {
             return "Certora could not resolve the pull request commit. Confirm the commit still exists on the remote and that the Certora GitHub App can read this repository. No balance reservation was created.";
         case "contract_not_found":
             return "The configured contract-path does not exist or cannot be read at the pull request commit. Check the contract-path input and its casing. No balance reservation was created.";
+        case "idempotency_conflict":
+            return "This GitHub workflow's launch inputs no longer match its original request, for example because the target branch advanced. Any accepted audit has not been cancelled. Inspect the original run in the dashboard. Rerunning with the same inputs cannot resolve branch drift; deliberately trigger a new GitHub workflow only if you want a new audit. Do not change the idempotency key to bypass this safety check.";
         default:
             return `Certora API error (${error.code}): ${error.message}`;
     }
@@ -32810,6 +32812,17 @@ function getConfig() {
     }
     const repositoryPrivate = repositoryPrivateValue;
     const workflow = parseWorkflow(core.getInput("workflow"));
+    if (workflow === "ai-auditor-diff") {
+        const expectedRepository = `${owner}/${repo}`.toLowerCase();
+        if (typeof pr.base?.ref !== "string" ||
+            !pr.base.ref ||
+            typeof pr.head?.ref !== "string" ||
+            !pr.head.ref ||
+            pr.base?.repo?.full_name?.toLowerCase() !== expectedRepository ||
+            pr.head?.repo?.full_name?.toLowerCase() !== expectedRepository) {
+            throw new Error("Diff reviews require named base and head branches in the current repository; fork or mismatched pull requests cannot be audited.");
+        }
+    }
     const waitForCompletion = parseBoolean(core.getInput("wait-for-completion"), "wait-for-completion", workflow !== "ai-auditor-full" && workflow !== "ai-auditor-diff");
     if (!waitForCompletion &&
         workflow !== "ai-auditor-full" &&
@@ -32839,6 +32852,12 @@ function getConfig() {
         repositoryPrivate,
         baseCommitSha: baseSha,
         headCommitSha: headSha,
+        ...(workflow === "ai-auditor-diff"
+            ? {
+                baseBranchName: pr.base.ref,
+                headBranchName: pr.head.ref,
+            }
+            : {}),
         prNumber: parsePositiveInteger(String(pr.number), "pull request number"),
         githubRunAttempt: parsePositiveInteger(String(github.context.runAttempt), "GitHub run attempt"),
         idempotencySeed: [
@@ -32942,7 +32961,7 @@ function getConfig() {
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.FINDING_MAX = exports.INSTRUCTIONS_MAX = exports.PATTERN_ARRAY_MAX = exports.PATTERN_MAX = exports.CONTRACT_NAME_MAX = exports.REPOSITORY_PATH_MAX = exports.SHUTDOWN_CANCEL_TIMEOUT_MS = exports.CANCELLATION_REQUEST_TIMEOUT_MS = exports.API_REQUEST_TIMEOUT_MS = exports.MAX_CONSECUTIVE_POLL_FAILURES = exports.MAX_RETRY_ATTEMPTS = exports.SHA_REGEX = exports.DEFAULT_MAX_ITERATIONS = exports.DEFAULT_TIMEOUT = exports.DEFAULT_POLL_INTERVAL = exports.PR_COMMENT_MARKER = exports.AUTO_PROVER_LABEL = exports.AI_AUDITOR_LABEL = exports.SEVERITY_LABEL_PREFIX = exports.SEVERITY_EMOJI = exports.SEVERITY_ORDER = void 0;
+exports.FINDING_MAX = exports.INSTRUCTIONS_MAX = exports.PATTERN_ARRAY_MAX = exports.PATTERN_MAX = exports.CONTRACT_NAME_MAX = exports.REPOSITORY_PATH_MAX = exports.SHUTDOWN_CANCEL_TIMEOUT_MS = exports.CANCELLATION_REQUEST_TIMEOUT_MS = exports.API_REQUEST_TIMEOUT_MS = exports.MAX_CONSECUTIVE_POLL_FAILURES = exports.MAX_RETRY_ATTEMPTS = exports.SHA_REGEX = exports.DEFAULT_MAX_ITERATIONS = exports.DEFAULT_TIMEOUT = exports.DEFAULT_POLL_INTERVAL = exports.PR_COMMENT_MARKER = exports.AUTO_PROVER_LABEL = exports.AI_AUDITOR_CHECK_NAME = exports.AI_AUDITOR_LABEL = exports.SEVERITY_LABEL_PREFIX = exports.SEVERITY_EMOJI = exports.SEVERITY_ORDER = void 0;
 exports.prCommentMarker = prCommentMarker;
 exports.modelModeLabel = modelModeLabel;
 exports.SEVERITY_ORDER = {
@@ -32959,6 +32978,7 @@ exports.SEVERITY_EMOJI = {
 };
 exports.SEVERITY_LABEL_PREFIX = "ai-auditor:";
 exports.AI_AUDITOR_LABEL = "ai-auditor";
+exports.AI_AUDITOR_CHECK_NAME = "Security Review";
 exports.AUTO_PROVER_LABEL = "auto-prover";
 exports.PR_COMMENT_MARKER = "<!-- autoprover-guardian-ci -->";
 function prCommentMarker(workflow, modelMode) {
@@ -33012,7 +33032,10 @@ function isServerManagedGithubDelivery(value) {
         !["pending", "in_progress", "completed"].includes(String(value.status)) ||
         !Number.isSafeInteger(check.id) ||
         check.id <= 0 ||
-        check.name !== "Zeus AI Audit" ||
+        // Older servers and persisted runs retain this exact legacy check name.
+        (check.name !== constants_1.AI_AUDITOR_CHECK_NAME &&
+            check.name !== "AI Auditor" &&
+            check.name !== "Zeus AI Audit") ||
         typeof check.head_sha !== "string" ||
         !constants_1.SHA_REGEX.test(check.head_sha) ||
         !["in_progress", "completed"].includes(String(check.status)) ||
@@ -33100,7 +33123,7 @@ function formatPrComment(findings, runId, cost, issueLinks, prNumber, workflow, 
     let body;
     if (totalFindings === 0) {
         body = `${(0, constants_1.prCommentMarker)(workflow, modelMode)}
-## \u2705 AI Auditor Results — No Findings
+## \u2705 Security Review — No Findings
 
 No security issues were detected in this PR.
 
@@ -33109,7 +33132,7 @@ No security issues were detected in this PR.
     }
     else {
         body = `${(0, constants_1.prCommentMarker)(workflow, modelMode)}
-## ${constants_1.SEVERITY_EMOJI.HIGH} AI Auditor Results
+## ${constants_1.SEVERITY_EMOJI.HIGH} Security Review
 
 | Severity | Count |
 |----------|-------|
@@ -33171,7 +33194,7 @@ function formatAiAuditorMarkdownPrComment(args) {
     const displayedCost = args.cost === null ? "unavailable" : `$${args.cost.toFixed(2)}`;
     const content = truncateReport(args.content, 50_000);
     return truncateReport(`${(0, constants_1.prCommentMarker)(args.workflow, args.modelMode)}
-## AI Auditor Results
+## Security Review
 
 ${content}
 
@@ -33189,7 +33212,7 @@ function escapeHtml(value) {
 }
 function formatFindingValidationPrComment(args) {
     const displayedCost = args.cost === null ? "unavailable" : `$${args.cost.toFixed(2)}`;
-    let body = `${(0, constants_1.prCommentMarker)("ai-auditor-finding-validation", args.modelMode)}\n## AI Auditor Finding Validation\n\n`;
+    let body = `${(0, constants_1.prCommentMarker)("ai-auditor-finding-validation", args.modelMode)}\n## Security Review — Finding Validation\n\n`;
     if (args.parsed) {
         const verdict = args.parsed.final_verdict === "VALID"
             ? "Valid finding"
@@ -33411,6 +33434,8 @@ const core = __importStar(__nccwpck_require__(7153));
 const github = __importStar(__nccwpck_require__(6137));
 const constants_1 = __nccwpck_require__(5851);
 const format_1 = __nccwpck_require__(4923);
+class DiffSourceVerificationError extends Error {
+}
 function hasLeadingCommentMarker(body, marker) {
     // Report Markdown can itself quote a different workflow's marker. Only the
     // first line is protocol metadata; never treat report contents as identity.
@@ -33445,6 +33470,80 @@ class GitHubClient {
         this.octokit = github.getOctokit(token);
         this.owner = github.context.repo.owner;
         this.repo = github.context.repo.repo;
+    }
+    /** Pin live branch tips, never the synthetic pull-request merge commit. */
+    async resolveDiffSource(args) {
+        const expectedRepository = `${this.owner}/${this.repo}`.toLowerCase();
+        const validBranch = (name) => typeof name === "string" &&
+            name.length > 0 &&
+            !/[\s\\~^:?*\[\x00-\x1f\x7f]/.test(name) &&
+            !name.includes("..") &&
+            !name.includes("@{") &&
+            !name.startsWith("refs/") &&
+            !name.endsWith(".") &&
+            name.split("/").every((part) => part.length > 0 && !part.startsWith(".") && !part.endsWith(".lock"));
+        if (args.repositoryUrl.toLowerCase() !== `https://github.com/${expectedRepository}` ||
+            !Number.isSafeInteger(args.prNumber) ||
+            args.prNumber <= 0 ||
+            !constants_1.SHA_REGEX.test(args.headCommitSha) ||
+            !validBranch(args.baseBranchName) ||
+            !validBranch(args.headBranchName)) {
+            throw new Error("Cannot verify diff review branch identities. No audit was launched.");
+        }
+        try {
+            const requestOptions = () => {
+                const remaining = args.deadlineMs === undefined
+                    ? 15_000
+                    : args.deadlineMs - Date.now();
+                if (!Number.isFinite(remaining) || remaining <= 0) {
+                    throw new DiffSourceVerificationError("The configured timeout expired while verifying the current branches. No audit was launched.");
+                }
+                // Octokit's fetch transport consumes signal, not a timeout option.
+                return { signal: AbortSignal.timeout(Math.min(15_000, remaining)) };
+            };
+            const { data: pull } = await this.octokit.rest.pulls.get({
+                owner: this.owner,
+                repo: this.repo,
+                pull_number: args.prNumber,
+                request: requestOptions(),
+            });
+            if (pull.number !== args.prNumber ||
+                pull.state !== "open" ||
+                pull.merged !== false ||
+                pull.base?.repo?.full_name?.toLowerCase() !== expectedRepository ||
+                pull.head?.repo?.full_name?.toLowerCase() !== expectedRepository ||
+                pull.base.ref !== args.baseBranchName ||
+                pull.head.ref !== args.headBranchName) {
+                throw new DiffSourceVerificationError("The pull request is closed, retargeted, or has mismatched repository or branch identities. No audit was launched.");
+            }
+            if (pull.head.sha !== args.headCommitSha) {
+                throw new DiffSourceVerificationError("The pull request head changed since this workflow event. No audit was launched; use the workflow for the current head instead of rerunning this stale event.");
+            }
+            const tips = await Promise.all([args.baseBranchName, args.headBranchName].map(async (branch) => {
+                const { data: reference } = await this.octokit.rest.git.getRef({
+                    owner: this.owner,
+                    repo: this.repo,
+                    ref: `heads/${branch}`,
+                    request: requestOptions(),
+                });
+                if (reference.ref !== `refs/heads/${branch}` ||
+                    reference.object?.type !== "commit" ||
+                    !constants_1.SHA_REGEX.test(reference.object.sha)) {
+                    throw new DiffSourceVerificationError("GitHub returned a mismatched or invalid branch reference. No audit was launched.");
+                }
+                return reference.object.sha;
+            }));
+            if (tips[1] !== args.headCommitSha) {
+                throw new DiffSourceVerificationError("The pull request head changed while verifying its branches. No audit was launched; use the workflow for the current head.");
+            }
+            return { baseCommitSha: tips[0], headCommitSha: tips[1] };
+        }
+        catch (error) {
+            // Never turn an unavailable GitHub read into an event-SHA fallback.
+            if (error instanceof DiffSourceVerificationError)
+                throw error;
+            throw new Error(`Could not verify the current pull request branches${githubFailureSummary(error)}. No audit was launched. Retry when GitHub is available.`);
+        }
     }
     async ensureLabelsExist(labels, severities) {
         const allLabels = [
@@ -34156,7 +34255,7 @@ function validateAsyncDelivery(run, config) {
         delivery.pull_request_number !== config.prNumber ||
         delivery.check.head_sha !== config.headCommitSha ||
         !new URL(delivery.check.html_url).pathname.toLowerCase().startsWith(`${new URL(config.repositoryUrl).pathname.toLowerCase()}/`)) {
-        throw new Error(`Certora accepted run ${run.id}, but did not confirm a server-owned Zeus AI Audit check for this pull request and head commit. The run has not been cancelled. Rerun with the same inputs and API key to recover it; do not change inputs to work around a missing handoff.`);
+        throw new Error(`Certora accepted run ${run.id}, but did not confirm a server-owned ${constants_1.AI_AUDITOR_CHECK_NAME} check for this pull request and head commit. The run has not been cancelled. Rerun with the same inputs and API key to recover it; do not change inputs to work around a missing handoff.`);
     }
     return delivery;
 }
@@ -34164,9 +34263,9 @@ function publishAsyncHandoff(run, config) {
     const delivery = validateAsyncDelivery(run, config);
     core.setOutput("check-run-id", String(delivery.check.id));
     core.setOutput("check-run-url", delivery.check.html_url);
-    core.info(`Server-owned ${delivery.check.name}: ${delivery.check.html_url}`);
+    core.info(`Server-owned ${constants_1.AI_AUDITOR_CHECK_NAME}: ${delivery.check.html_url}`);
     core.info(`Audit dashboard: ${run.dashboard_url}`);
-    core.info("Audit handoff confirmed. This workflow confirms launch, not a clean audit; the separate Zeus AI Audit check owns the final result and fail-on policy. No runner-side cancellation or result publishing will follow.");
+    core.info(`Audit handoff confirmed. This workflow confirms launch, not a clean audit; the separate ${constants_1.AI_AUDITOR_CHECK_NAME} check owns the final result and fail-on policy. No runner-side cancellation or result publishing will follow.`);
 }
 let activeRun = null;
 let shutdownHandlersRegistered = false;
@@ -34468,7 +34567,24 @@ async function run() {
     activeRun = null;
     initializeOutputs();
     core.info("Phase 1: Validating inputs...");
-    const config = (0, config_1.getConfig)();
+    const eventConfig = (0, config_1.getConfig)();
+    const deadlineMs = Date.now() + eventConfig.timeout * 60_000;
+    if (!Number.isSafeInteger(deadlineMs)) {
+        throw new Error("The configured timeout is too large.");
+    }
+    // Keep the key bound to the immutable event. Refreshing the submitted base
+    // must never mint a second paid launch on rerun; the server rejects a changed
+    // body for this same key before reserving balance.
+    const idempotencyBody = buildRunRequest(eventConfig);
+    const config = eventConfig.workflow === "ai-auditor-diff"
+        ? {
+            ...eventConfig,
+            ...(await new github_1.GitHubClient(eventConfig.githubToken).resolveDiffSource({
+                ...eventConfig,
+                deadlineMs,
+            })),
+        }
+        : eventConfig;
     const asyncAudit = isAsyncAuditConfig(config);
     if (asyncAudit) {
         for (const output of [
@@ -34476,10 +34592,6 @@ async function run() {
         ]) {
             core.setOutput(output, "");
         }
-    }
-    const deadlineMs = Date.now() + config.timeout * 60_000;
-    if (!Number.isSafeInteger(deadlineMs)) {
-        throw new Error("The configured timeout is too large.");
     }
     core.setOutput("workflow", config.workflow);
     core.info(`Repository: ${config.repositoryUrl}`);
@@ -34498,7 +34610,7 @@ async function run() {
     const body = buildRunRequest(config);
     core.info("Phase 2: Launch preflight is handled by the server. Existing runs are recovered before source and balance checks; new runs are validated and reserve balance during launch.");
     core.info("Phase 3: Launching run...");
-    const idempotencyKey = (0, api_1.createIdempotencyKey)(config.workflow, body, config.idempotencySeed);
+    const idempotencyKey = (0, api_1.createIdempotencyKey)(config.workflow, idempotencyBody, config.idempotencySeed);
     let currentRun = (await api.createRun(config.workflow, body, idempotencyKey))
         .run;
     let currentRunId = currentRun.id;
@@ -34553,7 +34665,7 @@ async function run() {
             if (Date.now() >= deadlineMs)
                 throw new api_1.AutoProverApiDeadlineError();
             usedAttemptScopedRetry = true;
-            const retryIdempotencyKey = (0, api_1.createIdempotencyKey)(config.workflow, body, `${config.idempotencySeed}:github-rerun-attempt:${config.githubRunAttempt}`);
+            const retryIdempotencyKey = (0, api_1.createIdempotencyKey)(config.workflow, idempotencyBody, `${config.idempotencySeed}:github-rerun-attempt:${config.githubRunAttempt}`);
             core.info(`GitHub rerun attempt ${config.githubRunAttempt} recovered terminal ${currentRun.status} run ${currentRunId}; launching one attempt-scoped retry.`);
             currentRun = (await api.createRun(config.workflow, body, retryIdempotencyKey)).run;
             currentRunId = currentRun.id;

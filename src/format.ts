@@ -82,7 +82,7 @@ export function formatPrComment(
 
   if (totalFindings === 0) {
     body = `${prCommentMarker(workflow, modelMode)}
-## \u2705 AI Auditor Results — No Findings
+## \u2705 Security Review — No Findings
 
 No security issues were detected in this PR.
 
@@ -90,7 +90,7 @@ No security issues were detected in this PR.
 `;
   } else {
     body = `${prCommentMarker(workflow, modelMode)}
-## ${SEVERITY_EMOJI.HIGH} AI Auditor Results
+## ${SEVERITY_EMOJI.HIGH} Security Review
 
 | Severity | Count |
 |----------|-------|
@@ -163,7 +163,7 @@ export function formatAiAuditorMarkdownPrComment(args: {
   const content = truncateReport(args.content, 50_000);
   return truncateReport(
     `${prCommentMarker(args.workflow, args.modelMode)}
-## AI Auditor Results
+## Security Review
 
 ${content}
 
@@ -192,7 +192,7 @@ export function formatFindingValidationPrComment(args: {
 }): string {
   const displayedCost =
     args.cost === null ? "unavailable" : `$${args.cost.toFixed(2)}`;
-  let body = `${prCommentMarker("ai-auditor-finding-validation", args.modelMode)}\n## AI Auditor Finding Validation\n\n`;
+  let body = `${prCommentMarker("ai-auditor-finding-validation", args.modelMode)}\n## Security Review — Finding Validation\n\n`;
 
   if (args.parsed) {
     const verdict =

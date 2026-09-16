@@ -37,6 +37,7 @@ import type {
 } from "./types";
 import { workflowEngine, workflowRunType } from "./types";
 import {
+  AI_AUDITOR_CHECK_NAME,
   CANCELLATION_REQUEST_TIMEOUT_MS,
   MAX_CONSECUTIVE_POLL_FAILURES,
   modelModeLabel,
@@ -540,7 +541,7 @@ function validateAsyncDelivery(
     )
   ) {
     throw new Error(
-      `Certora accepted run ${run.id}, but did not confirm a server-owned Zeus AI Audit check for this pull request and head commit. The run has not been cancelled. Rerun with the same inputs and API key to recover it; do not change inputs to work around a missing handoff.`,
+      `Certora accepted run ${run.id}, but did not confirm a server-owned ${AI_AUDITOR_CHECK_NAME} check for this pull request and head commit. The run has not been cancelled. Rerun with the same inputs and API key to recover it; do not change inputs to work around a missing handoff.`,
     );
   }
   return delivery;
@@ -550,10 +551,10 @@ function publishAsyncHandoff(run: Run, config: AiAuditorActionConfig): void {
   const delivery = validateAsyncDelivery(run, config);
   core.setOutput("check-run-id", String(delivery.check.id));
   core.setOutput("check-run-url", delivery.check.html_url);
-  core.info(`Server-owned ${delivery.check.name}: ${delivery.check.html_url}`);
+  core.info(`Server-owned ${AI_AUDITOR_CHECK_NAME}: ${delivery.check.html_url}`);
   core.info(`Audit dashboard: ${run.dashboard_url}`);
   core.info(
-    "Audit handoff confirmed. This workflow confirms launch, not a clean audit; the separate Zeus AI Audit check owns the final result and fail-on policy. No runner-side cancellation or result publishing will follow.",
+    `Audit handoff confirmed. This workflow confirms launch, not a clean audit; the separate ${AI_AUDITOR_CHECK_NAME} check owns the final result and fail-on policy. No runner-side cancellation or result publishing will follow.`,
   );
 }
 
@@ -1050,7 +1051,25 @@ export async function run(): Promise<void> {
   initializeOutputs();
 
   core.info("Phase 1: Validating inputs...");
-  const config = getConfig();
+  const eventConfig = getConfig();
+  const deadlineMs = Date.now() + eventConfig.timeout * 60_000;
+  if (!Number.isSafeInteger(deadlineMs)) {
+    throw new Error("The configured timeout is too large.");
+  }
+  // Keep the key bound to the immutable event. Refreshing the submitted base
+  // must never mint a second paid launch on rerun; the server rejects a changed
+  // body for this same key before reserving balance.
+  const idempotencyBody = buildRunRequest(eventConfig);
+  const config: ActionConfig =
+    eventConfig.workflow === "ai-auditor-diff"
+      ? {
+          ...eventConfig,
+          ...(await new GitHubClient(eventConfig.githubToken).resolveDiffSource({
+            ...eventConfig,
+            deadlineMs,
+          })),
+        }
+      : eventConfig;
   const asyncAudit = isAsyncAuditConfig(config);
   if (asyncAudit) {
     for (const output of [
@@ -1058,10 +1077,6 @@ export async function run(): Promise<void> {
     ]) {
       core.setOutput(output, "");
     }
-  }
-  const deadlineMs = Date.now() + config.timeout * 60_000;
-  if (!Number.isSafeInteger(deadlineMs)) {
-    throw new Error("The configured timeout is too large.");
   }
   core.setOutput("workflow", config.workflow);
   core.info(`Repository: ${config.repositoryUrl}`);
@@ -1088,7 +1103,7 @@ export async function run(): Promise<void> {
   core.info("Phase 3: Launching run...");
   const idempotencyKey = createIdempotencyKey(
     config.workflow,
-    body,
+    idempotencyBody,
     config.idempotencySeed,
   );
   let currentRun = (await api.createRun(config.workflow, body, idempotencyKey))
@@ -1160,7 +1175,7 @@ export async function run(): Promise<void> {
       usedAttemptScopedRetry = true;
       const retryIdempotencyKey = createIdempotencyKey(
         config.workflow,
-        body,
+        idempotencyBody,
         `${config.idempotencySeed}:github-rerun-attempt:${config.githubRunAttempt}`,
       );
       core.info(

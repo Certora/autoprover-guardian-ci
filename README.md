@@ -15,7 +15,7 @@ and validates source, calculates pricing, and reserves balance for new runs.
 The public API still supports optional estimates and the AISS
 `Estimate-Quote-Id` header for other callers; Guardian does not need either.
 Full/diff AI Auditor runs use an asynchronous handoff by default: the Action
-finishes successfully after the server confirms a persisted **Zeus AI Audit**
+finishes successfully after the server confirms a persisted **Security Review**
 check on the pull request head. That separate check stays pending while the
 audit runs and receives the terminal outcome. Other workflows, and full/diff
 runs with `wait-for-completion: true`, poll the canonical run resource until
@@ -77,14 +77,16 @@ jobs:
 
 The API key is sent as a Bearer token only to the configured Certora API base
 URL. `github-token` remains inside the action and is used only for GitHub issue,
-comment, and commit-follow-up operations. It is never sent to Certora.
+comment, PR/branch verification, and commit-follow-up operations. It is never sent to Certora. Diff reviews
+need `contents: read` and `pull-requests: read` for those live checks, even when
+server-side reporting is used.
 
 ## Asynchronous audit checks
 
 For full/diff AI Auditor, `wait-for-completion` defaults to `false`. The server
 persists the PR number, immutable head SHA, and `comment-on-pr`, `create-issues`,
 `issue-severities`, `fail-on`, and `labels` settings at launch. Before the Action
-can exit green, the server must acknowledge an actual **Zeus AI Audit** check
+can exit green, the server must acknowledge an actual **Security Review** check
 ID bound to that PR and commit. An absent or mismatched acknowledgement fails
 the Action; a launch response alone is not sufficient. The accepted audit is
 not cancelled on handshake/transport errors; recover it with the same inputs
@@ -96,19 +98,42 @@ The server rejects fork PRs during preflight, before reserving balance or
 starting paid audit work. This restriction applies to asynchronous full/diff
 delivery, independently of the separate AutoProver/AutoFuzzer fork restrictions.
 
-The persisted **Zeus AI Audit** check is owned by the organization's installed
+The persisted **Security Review** check is owned by the organization's installed
 GitHub App. Approve the App permissions above on the installation; workflow
 `permissions` only configure the runner's `GITHUB_TOKEN` and do not grant App
 permissions. The server mints fresh installation tokens for final reporting and
 never persists the runner's temporary token.
 
 The launch job's green result means **handoff succeeded**, not "no findings".
-Use **Zeus AI Audit** as the required audit check in branch protection. The
+Use **Security Review** as the required audit check in branch protection. The
 server keeps it pending until the audit is terminal, applies `fail-on`, and
 publishes the configured PR summary/issues. `check-run-id` and `check-run-url`
 identify that check; finding-count outputs are empty because this runner has
 not waited for results. Failed audits and findings matching `fail-on` are
 reported by the separate check, not by a runner that already finished.
+
+Upgrade pinned Action versions before deploying a server that publishes the
+renamed check: older Action versions require the previous name. This version
+accepts the current and legacy names for compatibility with older servers and existing runs.
+Once the server publishes **Security Review**, update branch-protection rules that
+still require the previous check name. The Action does not rename existing
+checks or change branch-protection settings.
+
+For diff reviews, the Action verifies the current open, same-repository PR and
+resolves the latest target-branch tip and PR-branch tip through GitHub before
+launch. Both are pinned as exact commit SHAs for that invocation; no synthetic
+merge commit or merge-base is used. If the PR head no longer matches the workflow
+event, or the PR was closed, retargeted, or cannot be verified, the Action stops
+before launching an audit. Use the workflow for the current head, not a stale
+event rerun. Full reviews and AutoProver/AutoFuzzer keep their existing sources.
+
+The diff launch key stays bound to the original workflow event. If the target
+branch advances between reruns, the server rejects the changed request with
+`idempotency_conflict` rather than charging for a second audit. The accepted run
+is not cancelled: inspect the original run in the dashboard. Rerunning with the
+same inputs cannot resolve that branch drift; deliberately trigger a new GitHub
+workflow only when a new audit is wanted. Never change the key to bypass this
+protection.
 
 The server's audit deadline is up to **96 hours**. This does not require a
 96-hour GitHub runner: the Action only waits for launch and check handoff.
@@ -390,8 +415,8 @@ errors, so correcting the repository access or path and rerunning is safe.
 | `workflow`             | Selected workflow                                  |
 | `model-mode`           | AI Auditor mode; empty for other engines or unrecorded historical runs |
 | `status`               | Last canonical run status                          |
-| `check-run-id`         | Server-owned Zeus AI Audit check ID after async handoff |
-| `check-run-url`        | Server-owned Zeus AI Audit check URL after async handoff |
+| `check-run-id`         | Server-owned Security Review check ID after async handoff |
+| `check-run-url`        | Server-owned Security Review check URL after async handoff |
 | `highs-count`          | AI Auditor HIGH finding count                      |
 | `mediums-count`        | AI Auditor MEDIUM finding count                    |
 | `lows-count`           | AI Auditor LOW finding count                       |

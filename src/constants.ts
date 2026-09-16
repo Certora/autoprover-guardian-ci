@@ -17,6 +17,7 @@ export const SEVERITY_EMOJI: Record<Severity, string> = {
 export const SEVERITY_LABEL_PREFIX = "ai-auditor:";
 
 export const AI_AUDITOR_LABEL = "ai-auditor";
+export const AI_AUDITOR_CHECK_NAME = "Security Review";
 export const AUTO_PROVER_LABEL = "auto-prover";
 
 export const PR_COMMENT_MARKER = "<!-- autoprover-guardian-ci -->";

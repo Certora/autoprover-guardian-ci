@@ -31,7 +31,7 @@ inputs:
     required: false
 
   github-token:
-    description: "GitHub token used locally by the action for issues, PR comments, and generated-commit verification. It is never sent to Certora. Private repository reads and generated writes require the organization GitHub App."
+    description: "GitHub token used locally by the action for PR/branch verification, issues, PR comments, and generated-commit verification. It is never sent to Certora. Private repository reads by Certora and generated writes require the organization GitHub App."
     required: true
     default: "${{ github.token }}"
 
@@ -69,7 +69,7 @@ inputs:
     default: "60"
 
   wait-for-completion:
-    description: "Full/diff AI Auditor: wait on this runner for completion. Empty defaults to false and hands off to the server-owned Zeus AI Audit check. Other workflows remain synchronous."
+    description: "Full/diff AI Auditor: wait on this runner for completion. Empty defaults to false and hands off to the server-owned Security Review check. Other workflows remain synchronous."
     required: false
     default: ""
 
@@ -127,10 +127,10 @@ outputs:
     description: "Last known run status (queued, running, finalizing, succeeded, failed, cancelling, or cancelled)"
 
   check-run-id:
-    description: "Server-owned Zeus AI Audit GitHub check ID after asynchronous handoff"
+    description: "Server-owned Security Review GitHub check ID after asynchronous handoff"
 
   check-run-url:
-    description: "Server-owned Zeus AI Audit GitHub check URL after asynchronous handoff"
+    description: "Server-owned Security Review GitHub check URL after asynchronous handoff"
 
   highs-count:
     description: "AI Auditor HIGH severity finding count; empty after asynchronous handoff"

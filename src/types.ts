@@ -65,7 +65,8 @@ export type ServerManagedGithubDelivery = {
   status: "pending" | "in_progress" | "completed";
   check: {
     id: number;
-    name: "Zeus AI Audit";
+    /** The legacy name remains accepted for older servers and persisted runs. */
+    name: "Security Review" | "AI Auditor" | "Zeus AI Audit";
     head_sha: string;
     html_url: string;
     status: "in_progress" | "completed";
@@ -361,6 +362,9 @@ type CommonActionConfig = {
 
 export type AiAuditorActionConfig = CommonActionConfig & {
   workflow: "ai-auditor-full" | "ai-auditor-diff";
+  /** Event branch identities, required for live diff-source verification. */
+  baseBranchName?: string;
+  headBranchName?: string;
   waitForCompletion: boolean;
   modelMode?: ModelMode;
   context: string[];

@@ -5,6 +5,7 @@ const {
   getCommitMock,
   getOctokitMock,
   getPullMock,
+  getRefMock,
   graphqlMock,
   infoMock,
   listCommentsMock,
@@ -17,6 +18,7 @@ const {
   getCommitMock: vi.fn(),
   getOctokitMock: vi.fn(),
   getPullMock: vi.fn(),
+  getRefMock: vi.fn(),
   graphqlMock: vi.fn(),
   infoMock: vi.fn(),
   listCommentsMock: vi.fn(),
@@ -69,6 +71,7 @@ describe("GitHubClient", () => {
       paginate: paginateMock,
       graphql: graphqlMock,
       rest: {
+        git: { getRef: getRefMock },
         pulls: {
           get: getPullMock,
         },
@@ -94,6 +97,117 @@ describe("GitHubClient", () => {
         viewerDidAuthor: true,
       })),
     }));
+  });
+
+  describe("live diff source verification", () => {
+    const baseSha = "c".repeat(40);
+    const source = {
+      prNumber: 42,
+      repositoryUrl: "https://github.com/Certora/contracts",
+      baseBranchName: "release/2026",
+      headBranchName: "feature/review",
+      headCommitSha: HEAD_SHA,
+    };
+    const currentPull = () => ({
+      number: 42, state: "open", merged: false,
+      merge_commit_sha: "d".repeat(40),
+      base: { ref: source.baseBranchName, sha: "a".repeat(40), repo: { full_name: "Certora/contracts" } },
+      head: { ref: source.headBranchName, sha: HEAD_SHA, repo: { full_name: "Certora/contracts" } },
+    });
+
+    beforeEach(() => {
+      getPullMock.mockResolvedValue({ data: currentPull() });
+      getRefMock.mockImplementation(async ({ ref }) => ({ data: {
+        ref: `refs/${ref}`,
+        object: { type: "commit", sha: ref === `heads/${source.baseBranchName}` ? baseSha : HEAD_SHA },
+      } }));
+    });
+
+    it("pins the latest base and PR branch tips, never event base or merge SHA", async () => {
+      await expect(new GitHubClient("token").resolveDiffSource(source)).resolves.toEqual({ baseCommitSha: baseSha, headCommitSha: HEAD_SHA });
+      expect(getPullMock).toHaveBeenCalledWith({ owner: "Certora", repo: "contracts", pull_number: 42, request: { signal: expect.any(AbortSignal) } });
+      expect(getRefMock.mock.calls.map(([arg]) => arg.ref)).toEqual(["heads/release/2026", "heads/feature/review"]);
+      expect(getRefMock.mock.calls.every(([arg]) => arg.request.signal instanceof AbortSignal)).toBe(true);
+    });
+
+    it("bounds every GitHub read by the remaining workflow deadline", async () => {
+      const timeout = vi.spyOn(AbortSignal, "timeout");
+      try {
+        await new GitHubClient("token").resolveDiffSource({ ...source, deadlineMs: Date.now() + 500 });
+        expect(timeout).toHaveBeenCalledTimes(3);
+        for (const [milliseconds] of timeout.mock.calls) {
+          expect(milliseconds).toBeGreaterThan(0);
+          expect(milliseconds).toBeLessThanOrEqual(500);
+        }
+      } finally {
+        timeout.mockRestore();
+      }
+    });
+
+    it("aborts a hanging GitHub read instead of proceeding to audit launch", async () => {
+      getPullMock.mockImplementation(({ request }) => new Promise((_resolve, reject) => {
+        request.signal.addEventListener("abort", () => reject(new Error("Aborted")), { once: true });
+      }));
+      await expect(new GitHubClient("token").resolveDiffSource({ ...source, deadlineMs: Date.now() + 20 })).rejects.toThrow("No audit was launched");
+      expect(getRefMock).not.toHaveBeenCalled();
+    });
+
+    it("does not start a GitHub read after the workflow deadline", async () => {
+      await expect(new GitHubClient("token").resolveDiffSource({ ...source, deadlineMs: Date.now() - 1 })).rejects.toThrow("timeout expired");
+      expect(getPullMock).not.toHaveBeenCalled();
+      expect(getRefMock).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["closed", { state: "closed" }],
+      ["merged", { merged: true }],
+      ["wrong PR", { number: 43 }],
+      ["retargeted", { base: { ...currentPull().base, ref: "other" } }],
+      ["wrong base repo", { base: { ...currentPull().base, repo: { full_name: "Other/contracts" } } }],
+      ["fork", { head: { ...currentPull().head, repo: { full_name: "Other/contracts" } } }],
+      ["deleted head repo", { head: { ...currentPull().head, repo: null } }],
+      ["wrong head ref", { head: { ...currentPull().head, ref: "other" } }],
+    ])("rejects a %s PR before resolving refs", async (_label, change) => {
+      getPullMock.mockResolvedValue({ data: { ...currentPull(), ...change } });
+      await expect(new GitHubClient("token").resolveDiffSource(source)).rejects.toThrow("No audit was launched");
+      expect(getRefMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects an old event instead of silently auditing the new PR head", async () => {
+      getPullMock.mockResolvedValue({ data: { ...currentPull(), head: { ...currentPull().head, sha: "d".repeat(40) } } });
+      await expect(new GitHubClient("token").resolveDiffSource(source)).rejects.toThrow("stale event");
+      expect(getRefMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects a head that advances while checking refs", async () => {
+      getRefMock.mockResolvedValueOnce({ data: { ref: `refs/heads/${source.baseBranchName}`, object: { type: "commit", sha: baseSha } } });
+      getRefMock.mockResolvedValueOnce({ data: { ref: `refs/heads/${source.headBranchName}`, object: { type: "commit", sha: "d".repeat(40) } } });
+      await expect(new GitHubClient("token").resolveDiffSource(source)).rejects.toThrow("head changed while verifying");
+    });
+
+    it.each([
+      { ref: "refs/heads/wrong", object: { type: "commit", sha: baseSha } },
+      { ref: `refs/heads/${source.baseBranchName}`, object: { type: "tag", sha: baseSha } },
+      { ref: `refs/heads/${source.baseBranchName}`, object: { type: "commit", sha: "main" } },
+    ])("rejects an ambiguous exact branch-ref response %#", async (reference) => {
+      getRefMock.mockResolvedValueOnce({ data: reference });
+      await expect(new GitHubClient("token").resolveDiffSource(source)).rejects.toThrow("invalid branch reference");
+    });
+
+    it.each([403, 404, 429, 500])("fails closed on GitHub HTTP %i", async (status) => {
+      getRefMock.mockRejectedValueOnce({ status, message: "credential must not leak" });
+      await expect(new GitHubClient("token").resolveDiffSource(source)).rejects.toThrow(`GitHub HTTP ${status}`);
+    });
+
+    it("sanitizes network errors rather than falling back to event commits", async () => {
+      getPullMock.mockRejectedValue(new Error("No audit was launched: secret token"));
+      await expect(new GitHubClient("token").resolveDiffSource(source)).rejects.toThrow("Could not verify the current pull request branches. No audit was launched");
+    });
+
+    it.each(["", "../main", "refs/heads/main", "main?ref=other", "main\nother"])("rejects unsafe branch identity %j before GitHub reads", async (baseBranchName) => {
+      await expect(new GitHubClient("token").resolveDiffSource({ ...source, baseBranchName })).rejects.toThrow("Cannot verify diff review branch identities");
+      expect(getPullMock).not.toHaveBeenCalled();
+    });
   });
 
   it.each([

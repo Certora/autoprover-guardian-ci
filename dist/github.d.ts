@@ -4,6 +4,18 @@ export declare class GitHubClient {
     private owner;
     private repo;
     constructor(token: string);
+    /** Pin live branch tips, never the synthetic pull-request merge commit. */
+    resolveDiffSource(args: {
+        prNumber: number;
+        repositoryUrl: string;
+        baseBranchName?: string;
+        headBranchName?: string;
+        headCommitSha: string;
+        deadlineMs?: number;
+    }): Promise<{
+        baseCommitSha: string;
+        headCommitSha: string;
+    }>;
     ensureLabelsExist(labels: string[], severities: Severity[]): Promise<void>;
     findExistingIssue(finding: Finding): Promise<number | null>;
     createOrUpdateIssue(finding: Finding, runId: string, prNumber: number, labels: string[]): Promise<string | null>;

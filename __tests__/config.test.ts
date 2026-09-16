@@ -10,10 +10,12 @@ const { getInputMock, githubContextMock, inputs, setSecretMock } = vi.hoisted(
         pull_request: {
           base: {
             sha: "a".repeat(40),
+            ref: "main",
             repo: { full_name: "Certora/autoprover-guardian-ci" },
           },
           head: {
             sha: "b".repeat(40),
+            ref: "feature/review",
             repo: { full_name: "Certora/autoprover-guardian-ci" },
           },
           number: 42,
@@ -45,6 +47,9 @@ describe("getConfig v2", () => {
     inputs.set("github-token", "ghs_test");
     inputs.set("context", "contracts/**/*.sol");
     githubContextMock.payload.repository.private = false;
+    githubContextMock.payload.pull_request.base.ref = "main";
+    githubContextMock.payload.pull_request.head.ref = "feature/review";
+    githubContextMock.payload.pull_request.base.repo.full_name = "Certora/autoprover-guardian-ci";
     githubContextMock.payload.pull_request.head.repo.full_name =
       "Certora/autoprover-guardian-ci";
     githubContextMock.runAttempt = 2;
@@ -65,6 +70,8 @@ describe("getConfig v2", () => {
       repositoryPrivate: false,
       baseCommitSha: "a".repeat(40),
       headCommitSha: "b".repeat(40),
+      baseBranchName: "main",
+      headBranchName: "feature/review",
       githubRunAttempt: 2,
       idempotencySeed: expect.stringContaining("123:certora"),
       context: ["contracts/**/*.sol"],
@@ -85,6 +92,16 @@ describe("getConfig v2", () => {
       expect(getConfig()).toMatchObject({ waitForCompletion: false });
     },
   );
+
+  it.each(["base", "head"] as const)("requires the event's %s branch identity for diff reviews", (side) => {
+    githubContextMock.payload.pull_request[side].ref = "";
+    expect(() => getConfig()).toThrow("Diff reviews require named base and head branches");
+  });
+
+  it.each(["base", "head"] as const)("rejects a mismatched %s repository for diff reviews", (side) => {
+    githubContextMock.payload.pull_request[side].repo.full_name = "other/repository";
+    expect(() => getConfig()).toThrow("fork or mismatched pull requests");
+  });
 
   it.each(["auto-prover", "auto-fuzzer", "ai-auditor-finding-validation"])(
     "does not silently detach unsupported workflow %s",

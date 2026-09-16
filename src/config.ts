@@ -296,6 +296,21 @@ export function getConfig(): ActionConfig {
   }
   const repositoryPrivate = repositoryPrivateValue;
   const workflow = parseWorkflow(core.getInput("workflow"));
+  if (workflow === "ai-auditor-diff") {
+    const expectedRepository = `${owner}/${repo}`.toLowerCase();
+    if (
+      typeof pr.base?.ref !== "string" ||
+      !pr.base.ref ||
+      typeof pr.head?.ref !== "string" ||
+      !pr.head.ref ||
+      pr.base?.repo?.full_name?.toLowerCase() !== expectedRepository ||
+      pr.head?.repo?.full_name?.toLowerCase() !== expectedRepository
+    ) {
+      throw new Error(
+        "Diff reviews require named base and head branches in the current repository; fork or mismatched pull requests cannot be audited.",
+      );
+    }
+  }
   const waitForCompletion = parseBoolean(
     core.getInput("wait-for-completion"),
     "wait-for-completion",
@@ -347,6 +362,12 @@ export function getConfig(): ActionConfig {
     repositoryPrivate,
     baseCommitSha: baseSha,
     headCommitSha: headSha,
+    ...(workflow === "ai-auditor-diff"
+      ? {
+          baseBranchName: pr.base.ref as string,
+          headBranchName: pr.head.ref as string,
+        }
+      : {}),
     prNumber: parsePositiveInteger(String(pr.number), "pull request number"),
     githubRunAttempt: parsePositiveInteger(
       String(github.context.runAttempt),

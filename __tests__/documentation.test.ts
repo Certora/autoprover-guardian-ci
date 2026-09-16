@@ -8,7 +8,7 @@ describe("published v2 documentation", () => {
   it("distinguishes successful asynchronous handoff from a successful audit", () => {
     const text = readme.replace(/\s+/g, " ");
     expect(text).toContain("`wait-for-completion` defaults to `false`");
-    expect(text).toContain("Zeus AI Audit");
+    expect(text).toContain("AI Auditor");
     expect(text).toContain("handoff succeeded");
     expect(text).toContain("96 hours");
     expect(text).toContain("does not require a 96-hour GitHub runner");
@@ -17,6 +17,26 @@ describe("published v2 documentation", () => {
     expect(text).toContain("`wait-for-completion: true`");
     expect(text).toContain("defaults to 120 minutes");
     expect(action).toContain("does not set the server audit deadline");
+  });
+
+  it("uses the current check branding and documents safe upgrade ordering", () => {
+    const text = readme.replace(/\s+/g, " ");
+    expect(readme).not.toMatch(/zeus/i);
+    expect(action).not.toMatch(/zeus/i);
+    expect(text).toContain("Use **Security Review** as the required audit check");
+    expect(text).toContain("Upgrade pinned Action versions before deploying a server");
+    expect(text).toContain("accepts the current and legacy names for compatibility");
+    expect(text).toContain("update branch-protection rules");
+    expect(action).toContain("server-owned Security Review check");
+  });
+
+  it("documents live diff snapshots and duplicate-charge prevention on reruns", () => {
+    const text = readme.replace(/\s+/g, " ");
+    expect(text).toContain("latest target-branch tip and PR-branch tip");
+    expect(text).toContain("no synthetic merge commit or merge-base");
+    expect(text).toContain("stops before launching an audit");
+    expect(text).toContain("`idempotency_conflict` rather than charging for a second audit");
+    expect(text).toContain("Rerunning with the same inputs cannot resolve");
   });
 
   it("documents bounded AutoContext failure and billing without a client budget", () => {

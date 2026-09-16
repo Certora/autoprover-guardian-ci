@@ -1,14 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { inputs, githubContext, info, setFailed, setOutput } = vi.hoisted(
+const { inputs, githubContext, info, setFailed, setOutput, resolveDiffSource } = vi.hoisted(
   () => ({
     inputs: new Map<string, string>(),
     githubContext: {
       payload: {
         repository: { private: false },
         pull_request: {
-          base: { sha: "a".repeat(40) },
-          head: { sha: "b".repeat(40) },
+          base: { sha: "a".repeat(40), ref: "main", repo: { full_name: "example/mixed-language-app" } },
+          head: { sha: "b".repeat(40), ref: "feature/review", repo: { full_name: "example/mixed-language-app" } },
           number: 42,
         },
       },
@@ -20,6 +20,7 @@ const { inputs, githubContext, info, setFailed, setOutput } = vi.hoisted(
     info: vi.fn(),
     setFailed: vi.fn(),
     setOutput: vi.fn(),
+    resolveDiffSource: vi.fn(async () => ({ baseCommitSha: "a".repeat(40), headCommitSha: "b".repeat(40) })),
   }),
 );
 
@@ -38,13 +39,13 @@ vi.mock("@actions/core", () => ({
 vi.mock("@actions/github", () => ({ context: githubContext }));
 vi.mock("../src/github", () => ({
   GitHubClient: vi.fn(function GitHubClient() {
-    return {};
+    return { resolveDiffSource };
   }),
 }));
 
 // Keep config parsing, request building, idempotency, HTTP retries, response
 // validation, and polling real. Only the external HTTP/GitHub boundaries are fake.
-import { AutoProverApiError } from "../src/api";
+import { AutoProverApiError, getAutoProverApiErrorMessage } from "../src/api";
 import { AUTO_CONTEXT_FAILURE_CODES } from "../src/automatic-context";
 import { run } from "../src/run";
 import type { Run } from "../src/types";
@@ -246,6 +247,58 @@ describe("automatic context through the real Guardian request pipeline", () => {
       inputs.set(key, value);
   });
 
+  it.each([false, true])("keeps one paid diff launch when the target branch advances on rerun: %s", async (advanceBase) => {
+    inputs.set("workflow", "ai-auditor-diff");
+    inputs.delete("wait-for-completion");
+    const firstBase = "c".repeat(40);
+    const secondBase = advanceBase ? "d".repeat(40) : firstBase;
+    resolveDiffSource.mockResolvedValueOnce({ baseCommitSha: firstBase, headCommitSha: "b".repeat(40) });
+    resolveDiffSource.mockResolvedValueOnce({ baseCommitSha: secondBase, headCommitSha: "b".repeat(40) });
+    const accepted = runResponse("ai-auditor-diff", "queued", {
+      source: { repository_url: REPOSITORY_URL, base_commit_sha: firstBase, head_commit_sha: "b".repeat(40) },
+      delivery: {
+        type: "github_pull_request", pull_request_number: 42, managed_by: "server", status: "pending",
+        check: { id: 12345, name: "Security Review", head_sha: "b".repeat(40), html_url: "https://github.com/example/mixed-language-app/runs/12345", status: "in_progress" },
+        error: null,
+      },
+    });
+    const requests = new Map<string, string>();
+    let paidLaunches = 0;
+    fetchMock.mockImplementation(async (input, options) => {
+      if ((options?.method ?? "GET") === "GET" && String(input) === `${API_URL}/v2/runs/${RUN_ID}`) return accepted.clone();
+      expect(String(input)).toBe(collection("ai-auditor-diff"));
+      expect(options?.method).toBe("POST");
+      const key = new Headers(options?.headers).get("Idempotency-Key")!;
+      const request = String(options?.body);
+      if (requests.has(key) && requests.get(key) !== request) {
+        return json({ code: "idempotency_conflict", detail: "This key already belongs to a different request body.", status: 409, retryable: false }, 409);
+      }
+      if (!requests.has(key)) paidLaunches += 1;
+      requests.set(key, request);
+      return accepted.clone();
+    });
+
+    await run();
+    githubContext.runAttempt = 2;
+    if (advanceBase) {
+      await expect(run()).rejects.toMatchObject({ code: "idempotency_conflict", statusCode: 409 });
+      const guidance = getAutoProverApiErrorMessage(new AutoProverApiError("idempotency_conflict", "conflict", 409, false));
+      expect(guidance).toContain("accepted audit has not been cancelled");
+      expect(guidance).toContain("Rerunning with the same inputs cannot resolve branch drift");
+      expect(guidance).toContain("Inspect the original run");
+    } else {
+      await run();
+    }
+
+    const launches = fetchMock.mock.calls.filter(([, options]) => options?.method === "POST");
+    expect(launches).toHaveLength(2);
+    expect(launches.map(([, options]) => new Headers(options?.headers).get("Idempotency-Key"))[0]).toBe(new Headers(launches[1][1]?.headers).get("Idempotency-Key"));
+    expect(launches.map(([, options]) => JSON.parse(String(options?.body)).source.base_commit_sha)).toEqual([firstBase, secondBase]);
+    expect(paidLaunches).toBe(1);
+    expect(resolveDiffSource).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/cancel"))).toBe(false);
+  });
+
   describe.each(["ai-auditor-full", "ai-auditor-diff"] as const)("async default for %s", (workflow) => {
     it.each(["success", "ambiguous network failure"])(
       "hands off without polling after %s, preserving the canonical request on retry",
@@ -262,7 +315,7 @@ describe("automatic context through the real Guardian request pipeline", () => {
           status: "pending",
           check: {
             id: 12345,
-            name: "Zeus AI Audit",
+            name: "Security Review",
             head_sha: "b".repeat(40),
             html_url: `${REPOSITORY_URL}/runs/12345`,
             status: "in_progress",
@@ -306,7 +359,7 @@ describe("automatic context through the real Guardian request pipeline", () => {
       inputs.set("workflow", workflow);
       inputs.delete("wait-for-completion");
       fetchMock.mockResolvedValueOnce(runResponse(workflow, "queued"));
-      await expect(run()).rejects.toThrow("did not confirm a server-owned Zeus AI Audit check");
+      await expect(run()).rejects.toThrow("did not confirm a server-owned Security Review check");
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(setOutput).toHaveBeenCalledWith("run-id", RUN_ID);
       expect(vi.getTimerCount()).toBe(0);

@@ -24,6 +24,8 @@ type CommentOwnershipResponse = {
   } | null)[];
 };
 
+class DiffSourceVerificationError extends Error {}
+
 function hasLeadingCommentMarker(
   body: string | null | undefined,
   marker: string,
@@ -67,6 +69,112 @@ export class GitHubClient {
     this.octokit = github.getOctokit(token);
     this.owner = github.context.repo.owner;
     this.repo = github.context.repo.repo;
+  }
+
+  /** Pin live branch tips, never the synthetic pull-request merge commit. */
+  async resolveDiffSource(args: {
+    prNumber: number;
+    repositoryUrl: string;
+    baseBranchName?: string;
+    headBranchName?: string;
+    headCommitSha: string;
+    deadlineMs?: number;
+  }): Promise<{ baseCommitSha: string; headCommitSha: string }> {
+    const expectedRepository = `${this.owner}/${this.repo}`.toLowerCase();
+    const validBranch = (name: string | undefined): name is string =>
+      typeof name === "string" &&
+      name.length > 0 &&
+      !/[\s\\~^:?*\[\x00-\x1f\x7f]/.test(name) &&
+      !name.includes("..") &&
+      !name.includes("@{") &&
+      !name.startsWith("refs/") &&
+      !name.endsWith(".") &&
+      name.split("/").every((part) =>
+        part.length > 0 && !part.startsWith(".") && !part.endsWith(".lock"),
+      );
+    if (
+      args.repositoryUrl.toLowerCase() !== `https://github.com/${expectedRepository}` ||
+      !Number.isSafeInteger(args.prNumber) ||
+      args.prNumber <= 0 ||
+      !SHA_REGEX.test(args.headCommitSha) ||
+      !validBranch(args.baseBranchName) ||
+      !validBranch(args.headBranchName)
+    ) {
+      throw new Error(
+        "Cannot verify diff review branch identities. No audit was launched.",
+      );
+    }
+
+    try {
+      const requestOptions = () => {
+        const remaining = args.deadlineMs === undefined
+          ? 15_000
+          : args.deadlineMs - Date.now();
+        if (!Number.isFinite(remaining) || remaining <= 0) {
+          throw new DiffSourceVerificationError(
+            "The configured timeout expired while verifying the current branches. No audit was launched.",
+          );
+        }
+        // Octokit's fetch transport consumes signal, not a timeout option.
+        return { signal: AbortSignal.timeout(Math.min(15_000, remaining)) };
+      };
+      const { data: pull } = await this.octokit.rest.pulls.get({
+        owner: this.owner,
+        repo: this.repo,
+        pull_number: args.prNumber,
+        request: requestOptions(),
+      });
+      if (
+        pull.number !== args.prNumber ||
+        pull.state !== "open" ||
+        pull.merged !== false ||
+        pull.base?.repo?.full_name?.toLowerCase() !== expectedRepository ||
+        pull.head?.repo?.full_name?.toLowerCase() !== expectedRepository ||
+        pull.base.ref !== args.baseBranchName ||
+        pull.head.ref !== args.headBranchName
+      ) {
+        throw new DiffSourceVerificationError(
+          "The pull request is closed, retargeted, or has mismatched repository or branch identities. No audit was launched.",
+        );
+      }
+      if (pull.head.sha !== args.headCommitSha) {
+        throw new DiffSourceVerificationError(
+          "The pull request head changed since this workflow event. No audit was launched; use the workflow for the current head instead of rerunning this stale event.",
+        );
+      }
+      const tips = await Promise.all(
+        [args.baseBranchName, args.headBranchName].map(async (branch) => {
+          const { data: reference } = await this.octokit.rest.git.getRef({
+            owner: this.owner,
+            repo: this.repo,
+            ref: `heads/${branch}`,
+            request: requestOptions(),
+          });
+          if (
+            reference.ref !== `refs/heads/${branch}` ||
+            reference.object?.type !== "commit" ||
+            !SHA_REGEX.test(reference.object.sha)
+          ) {
+            throw new DiffSourceVerificationError(
+              "GitHub returned a mismatched or invalid branch reference. No audit was launched.",
+            );
+          }
+          return reference.object.sha;
+        }),
+      );
+      if (tips[1] !== args.headCommitSha) {
+        throw new DiffSourceVerificationError(
+          "The pull request head changed while verifying its branches. No audit was launched; use the workflow for the current head.",
+        );
+      }
+      return { baseCommitSha: tips[0], headCommitSha: tips[1] };
+    } catch (error) {
+      // Never turn an unavailable GitHub read into an event-SHA fallback.
+      if (error instanceof DiffSourceVerificationError) throw error;
+      throw new Error(
+        `Could not verify the current pull request branches${githubFailureSummary(error)}. No audit was launched. Retry when GitHub is available.`,
+      );
+    }
   }
 
   async ensureLabelsExist(

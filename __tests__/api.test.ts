@@ -54,7 +54,7 @@ function serverDelivery(): ServerManagedGithubDelivery {
     status: "pending",
     check: {
       id: 12345,
-      name: "Zeus AI Audit",
+      name: "Security Review",
       head_sha: "a".repeat(40),
       html_url: "https://github.com/Certora/contracts/runs/12345",
       status: "in_progress",
@@ -67,11 +67,16 @@ describe("AutoProverApi v2", () => {
   beforeEach(() => vi.restoreAllMocks());
   afterEach(() => vi.useRealTimers());
 
-  it.each(["pending", "in_progress", "completed"] as const)(
-    "decodes a persisted server check with delivery status %s",
-    async (status) => {
+  it.each(
+    (["pending", "in_progress", "completed"] as const).flatMap((status) =>
+      (["Security Review", "AI Auditor", "Zeus AI Audit"] as const).map((name) => ({ status, name })),
+    ),
+  )(
+    "decodes a persisted $name check with delivery status $status",
+    async ({ status, name }) => {
       const delivery = serverDelivery();
       delivery.status = status;
+      delivery.check.name = name;
       if (status === "completed") delivery.check.status = "completed";
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(
         JSON.stringify({ request_id: "check", run: { ...run, delivery } }),

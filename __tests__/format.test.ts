@@ -54,6 +54,20 @@ const commit = {
 };
 
 describe("AI Auditor formatting", () => {
+  it("brands full/diff PR summaries as Security Review while preserving engine and identity", () => {
+    const summaries = [
+      formatPrComment({ highs: [finding], mediums: [], lows: [], infos: [] }, "run-1", 1, [], 42, "ai-auditor-diff"),
+      formatPrComment({ highs: [], mediums: [], lows: [], infos: [] }, "run-1", 1, [], 42, "ai-auditor-full"),
+      formatAiAuditorMarkdownPrComment({ workflow: "ai-auditor-diff", runId: "run-1", cost: 1, content: "Findings" }),
+    ];
+    for (const summary of summaries) {
+      expect(summary).toContain("Security Review");
+      expect(summary).not.toContain("AI Auditor Results");
+      expect(summary).toContain("Powered by [AI Auditor]");
+      expect(summary).toMatch(/^<!-- certora-guardian-ci:ai-auditor-(diff|full) -->/);
+    }
+  });
+
   it("keeps the legacy Normal marker and separates Frontier comments", () => {
     expect(prCommentMarker("ai-auditor-diff", "normal")).toBe(
       prCommentMarker("ai-auditor-diff"),

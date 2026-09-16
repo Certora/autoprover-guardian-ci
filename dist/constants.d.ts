@@ -3,6 +3,7 @@ export declare const SEVERITY_ORDER: Record<Severity, number>;
 export declare const SEVERITY_EMOJI: Record<Severity, string>;
 export declare const SEVERITY_LABEL_PREFIX = "ai-auditor:";
 export declare const AI_AUDITOR_LABEL = "ai-auditor";
+export declare const AI_AUDITOR_CHECK_NAME = "Security Review";
 export declare const AUTO_PROVER_LABEL = "auto-prover";
 export declare const PR_COMMENT_MARKER = "<!-- autoprover-guardian-ci -->";
 export declare function prCommentMarker(workflow: string, modelMode?: ModelMode | null): string;

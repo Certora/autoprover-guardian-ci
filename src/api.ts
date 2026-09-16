@@ -55,6 +55,8 @@ export function getAutoProverApiErrorMessage(
       return "Certora could not resolve the pull request commit. Confirm the commit still exists on the remote and that the Certora GitHub App can read this repository. No balance reservation was created.";
     case "contract_not_found":
       return "The configured contract-path does not exist or cannot be read at the pull request commit. Check the contract-path input and its casing. No balance reservation was created.";
+    case "idempotency_conflict":
+      return "This GitHub workflow's launch inputs no longer match its original request, for example because the target branch advanced. Any accepted audit has not been cancelled. Inspect the original run in the dashboard. Rerunning with the same inputs cannot resolve branch drift; deliberately trigger a new GitHub workflow only if you want a new audit. Do not change the idempotency key to bypass this safety check.";
     default:
       return `Certora API error (${error.code}): ${error.message}`;
   }

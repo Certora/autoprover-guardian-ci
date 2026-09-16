@@ -5,6 +5,7 @@ const {
   createIdempotencyKeyMock,
   getConfigMock,
   getGeneratedFollowupMock,
+  resolveDiffSourceMock,
   infoMock,
   setFailedMock,
   setOutputMock,
@@ -21,6 +22,7 @@ const {
   createIdempotencyKeyMock: vi.fn(() => "certora-guardian-stable"),
   getConfigMock: vi.fn(),
   getGeneratedFollowupMock: vi.fn(),
+  resolveDiffSourceMock: vi.fn(),
   infoMock: vi.fn(),
   setFailedMock: vi.fn(),
   setOutputMock: vi.fn(),
@@ -50,6 +52,7 @@ vi.mock("../src/github", () => ({
   GitHubClient: vi.fn(function GitHubClient() {
     return {
       getGeneratedFollowup: getGeneratedFollowupMock,
+      resolveDiffSource: resolveDiffSourceMock,
       upsertPrComment: upsertPrCommentMock,
       ensureLabelsExist: vi.fn(),
       createOrUpdateIssue: vi.fn(),
@@ -64,6 +67,7 @@ import type {
   FindingValidationActionConfig,
   ModelMode,
   Run,
+  ServerManagedGithubDelivery,
   StandaloneActionConfig,
   Workflow,
 } from "../src/types";
@@ -89,6 +93,8 @@ function aiConfig(
     repositoryPrivate: false,
     baseCommitSha: "a".repeat(40),
     headCommitSha: HEAD_SHA,
+    baseBranchName: "main",
+    headBranchName: "feature/review",
     prNumber: 42,
     githubRunAttempt: 1,
     idempotencySeed: "github-run-123",
@@ -250,6 +256,7 @@ function estimate(canLaunch = true, estimateQuoteId?: string) {
 function managedAuditRun(
   workflow: "ai-auditor-full" | "ai-auditor-diff" = "ai-auditor-diff",
   status: Run["status"] = "queued",
+  checkName: ServerManagedGithubDelivery["check"]["name"] = "Security Review",
 ): Run {
   const terminal = ["succeeded", "failed", "cancelled"].includes(status);
   return {
@@ -261,7 +268,7 @@ function managedAuditRun(
       status: terminal ? "completed" : "pending",
       check: {
         id: 12345,
-        name: "Zeus AI Audit",
+        name: checkName,
         head_sha: HEAD_SHA,
         html_url: "https://github.com/Certora/contracts/runs/12345",
         status: terminal ? "completed" : "in_progress",
@@ -379,6 +386,8 @@ describe("run v2 orchestration", () => {
     for (const method of Object.values(apiMethods)) method.mockReset();
     createIdempotencyKeyMock.mockReturnValue("certora-guardian-stable");
     getGeneratedFollowupMock.mockResolvedValue(null);
+    resolveDiffSourceMock.mockReset();
+    resolveDiffSourceMock.mockResolvedValue({ baseCommitSha: "a".repeat(40), headCommitSha: HEAD_SHA });
     apiMethods.estimateRun.mockResolvedValue(estimate());
     apiMethods.cancelRun.mockResolvedValue({
       request_id: "req-cancel",
@@ -388,9 +397,41 @@ describe("run v2 orchestration", () => {
   });
 
   describe("asynchronous full/diff audit handoff", () => {
-    it.each(["ai-auditor-full", "ai-auditor-diff"] as const)(
-      "hands off %s only with a persisted check and no local result work",
-      async (workflow) => {
+    it("submits live base tips once while keeping the event-derived launch key", async () => {
+      const config = { ...aiConfig(), waitForCompletion: false };
+      const freshBase = "c".repeat(40);
+      getConfigMock.mockReturnValue(config);
+      resolveDiffSourceMock.mockResolvedValue({ baseCommitSha: freshBase, headCommitSha: HEAD_SHA });
+      const accepted = managedAuditRun();
+      accepted.source.base_commit_sha = freshBase;
+      apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: accepted });
+
+      await run();
+
+      expect(resolveDiffSourceMock).toHaveBeenCalledExactlyOnceWith({ ...config, deadlineMs: expect.any(Number) });
+      expect(apiMethods.createRun).toHaveBeenCalledWith("ai-auditor-diff", expect.objectContaining({
+        source: expect.objectContaining({ base_commit_sha: freshBase, head_commit_sha: HEAD_SHA }),
+      }), "certora-guardian-stable");
+      expect(createIdempotencyKeyMock).toHaveBeenCalledWith("ai-auditor-diff", buildRunRequest(config), config.idempotencySeed);
+      expect(config.baseCommitSha).toBe("a".repeat(40));
+    });
+
+    it.each(["stale head", "closed PR", "fork PR", "retargeted PR", "GitHub unavailable"])("does no paid work when diff-source verification fails: %s", async (reason) => {
+      getConfigMock.mockReturnValue({ ...aiConfig(), waitForCompletion: false });
+      resolveDiffSourceMock.mockRejectedValue(new Error(reason));
+      await expect(run()).rejects.toThrow(reason);
+      expect(apiMethods.createRun).not.toHaveBeenCalled();
+      expect(apiMethods.estimateRun).not.toHaveBeenCalled();
+      expect(apiMethods.cancelRun).not.toHaveBeenCalled();
+    });
+
+    it.each(
+      (["ai-auditor-full", "ai-auditor-diff"] as const).flatMap((workflow) =>
+        (["Security Review", "AI Auditor", "Zeus AI Audit"] as const).map((checkName) => ({ workflow, checkName })),
+      ),
+    )(
+      "hands off $workflow with a persisted $checkName check and current branding",
+      async ({ workflow, checkName }) => {
         const config = {
           ...aiConfig(workflow),
           waitForCompletion: false,
@@ -399,7 +440,7 @@ describe("run v2 orchestration", () => {
           failOn: ["HIGH"] as const,
         };
         getConfigMock.mockReturnValue(config);
-        apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: managedAuditRun(workflow) });
+        apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: managedAuditRun(workflow, "queued", checkName) });
 
         await run();
 
@@ -425,6 +466,12 @@ describe("run v2 orchestration", () => {
         expect(setOutputMock).toHaveBeenCalledWith("status", "queued");
         expect(setOutputMock).toHaveBeenCalledWith("check-run-id", "12345");
         expect(setOutputMock).toHaveBeenCalledWith("check-run-url", "https://github.com/Certora/contracts/runs/12345");
+        expect(infoMock).toHaveBeenCalledWith("Server-owned Security Review: https://github.com/Certora/contracts/runs/12345");
+        expect(infoMock).toHaveBeenCalledWith(expect.stringContaining("the separate Security Review check owns the final result"));
+        expect(JSON.stringify(infoMock.mock.calls)).not.toMatch(/zeus/i);
+        if (workflow === "ai-auditor-full") {
+          expect(resolveDiffSourceMock).not.toHaveBeenCalled();
+        }
         for (const name of ["highs-count", "mediums-count", "lows-count", "infos-count"]) {
           expect(setOutputMock.mock.calls.filter(([output]) => output === name).at(-1)).toEqual([name, ""]);
         }
@@ -446,7 +493,7 @@ describe("run v2 orchestration", () => {
       accepted.delivery = mutate(accepted.delivery);
       apiMethods.createRun.mockResolvedValue({ request_id: "launch", run: accepted });
 
-      await expect(run()).rejects.toThrow("did not confirm a server-owned Zeus AI Audit check");
+      await expect(run()).rejects.toThrow("did not confirm a server-owned Security Review check");
 
       expect(setOutputMock).toHaveBeenCalledWith("run-id", RUN_ID);
       expect(apiMethods.getRun).not.toHaveBeenCalled();
@@ -1458,6 +1505,7 @@ describe("run v2 orchestration", () => {
 
     await run();
 
+    expect(resolveDiffSourceMock).not.toHaveBeenCalled();
     expect(buildRunRequest(config)).toMatchObject({
       contract: { path: "src/Vault.sol", name: "Vault" },
       delivery: { type: "github_pull_request", pull_request_number: 42 },
