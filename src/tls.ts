@@ -39,9 +39,9 @@ function fingerprintOf(pem: string): string {
 /**
  * Remove the compromised roots from Node's default CA store, which `fetch`
  * and every TLS client without its own `ca` option use. Returns the names of
- * the roots it removed: none on a runner Node older than 24.5 (no
- * `setDefaultCACertificates`), or once Node ships a store without them, which
- * is when this can go.
+ * the roots it removed: none on a runner Node without
+ * `setDefaultCACertificates` (before 22.19 and 24.5), or once Node ships a
+ * store without them, which is when this can go.
  */
 export function distrustCompromisedRoots(): string[] {
   if (typeof tls.setDefaultCACertificates !== "function") return [];
