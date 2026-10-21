@@ -33843,6 +33843,12 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 const core = __importStar(__nccwpck_require__(7153));
 const api_1 = __nccwpck_require__(7822);
 const run_1 = __nccwpck_require__(3587);
+const tls_1 = __nccwpck_require__(2979);
+// Before any request: the API key must never reach a forged certificate.
+const distrusted = (0, tls_1.distrustCompromisedRoots)();
+if (distrusted.length > 0) {
+    core.info(`Distrusted compromised root CAs: ${distrusted.join(", ")}`);
+}
 (0, run_1.run)().catch((error) => {
     if (error instanceof api_1.AutoProverApiError) {
         core.setFailed((0, api_1.getAutoProverApiErrorMessage)(error));
@@ -34898,6 +34904,107 @@ async function run() {
         await publishAiAuditorResult(resultApi, config, currentRun, currentRunId);
     }
     core.info(`${(0, types_1.workflowEngine)(config.workflow)} run ${currentRunId} completed with status ${currentRun.status}.`);
+}
+
+
+/***/ }),
+
+/***/ 2979:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.COMPROMISED_ROOT_FINGERPRINTS = void 0;
+exports.distrustCompromisedRoots = distrustCompromisedRoots;
+const node_crypto_1 = __nccwpck_require__(7598);
+const tls = __importStar(__nccwpck_require__(1692));
+/**
+ * Root CAs over the eMudhra intermediates whose private keys were found
+ * recoverable from the public certificates in October 2026 (Mozilla bug
+ * 2083449, https://emudhra.we-have-a-problem.com/). Anyone can sign a
+ * certificate for any host under them. Node checks no revocation and its
+ * bundled store still trusts "emSign ECC Root CA - G3", so a runner on an
+ * intercepted network would send the organization API key to a forged
+ * Certora API certificate.
+ *
+ * SHA-256 fingerprints, from the incident's roots.json.
+ */
+exports.COMPROMISED_ROOT_FINGERPRINTS = new Map([
+    [
+        "86A1ECBA089C4A8D3BBE2734C612BA341D813E043CF9E8A862CD5C57A36BBE6B",
+        "emSign ECC Root CA - G3",
+    ],
+    [
+        "7DD78D5F4F13459A83DFF9ABBBA62EDBAF6F2D102BF257FD712F4D9F2746ED8D",
+        "emSign Root TLS CA - G3",
+    ],
+    [
+        "F2EDAAFF3D9B701FB4D14C9F285F8C0BAD90FC3BCC1FA07D47F4718EDABA34A5",
+        "emSign Root CS CA - G3",
+    ],
+    [
+        "D7A7A0FB5D7E2731D771E9484EBCDEF71D5F0C3E0A2948782BC83EE0EA699EF4",
+        "AAA Certificate Services",
+    ],
+]);
+function fingerprintOf(pem) {
+    return new node_crypto_1.X509Certificate(pem).fingerprint256.replaceAll(":", "");
+}
+/**
+ * Remove the compromised roots from Node's default CA store, which `fetch`
+ * and every TLS client without its own `ca` option use. Returns the names of
+ * the roots it removed: none on a runner Node older than 24.5 (no
+ * `setDefaultCACertificates`), or once Node ships a store without them, which
+ * is when this can go.
+ */
+function distrustCompromisedRoots() {
+    if (typeof tls.setDefaultCACertificates !== "function")
+        return [];
+    const roots = tls.getCACertificates("default");
+    const removed = [];
+    const kept = roots.filter((pem) => {
+        const name = exports.COMPROMISED_ROOT_FINGERPRINTS.get(fingerprintOf(pem));
+        if (name !== undefined)
+            removed.push(name);
+        return name === undefined;
+    });
+    if (removed.length > 0)
+        tls.setDefaultCACertificates(kept);
+    return removed;
 }
 
 
