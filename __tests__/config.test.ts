@@ -501,6 +501,82 @@ describe("getConfig v2", () => {
     },
   );
 
+  it("parses an AutoProver evaluate run with a property suite", () => {
+    inputs.set("workflow", "auto-prover");
+    inputs.delete("context");
+    inputs.set("contract-path", "src/Vault.sol");
+    inputs.set("contract-name", "Vault");
+    inputs.set("run-mode", " evaluate ");
+    inputs.set("property-suite-path", "specs/vault.property-suite.json");
+    expect(getConfig()).toMatchObject({
+      workflow: "auto-prover",
+      runMode: "evaluate",
+      propertySuitePath: "specs/vault.property-suite.json",
+    });
+  });
+
+  it.each(["prioritized", "comprehensive"])(
+    "parses AutoProver run-mode %s without a suite",
+    (mode) => {
+      inputs.set("workflow", "auto-prover");
+      inputs.set("contract-path", "src/Vault.sol");
+      inputs.set("contract-name", "Vault");
+      inputs.set("run-mode", mode);
+      const config = getConfig();
+      expect(config).toMatchObject({ runMode: mode });
+      expect(config).not.toHaveProperty("propertySuitePath", expect.anything());
+    },
+  );
+
+  it.each([
+    [{ "run-mode": "property_generation" }, "run-mode must be"],
+    [{ "run-mode": "Evaluate" }, "run-mode must be"],
+    [
+      { "property-suite-path": "specs/vault.property-suite.json" },
+      "requires run-mode: evaluate",
+    ],
+    [
+      {
+        "run-mode": "comprehensive",
+        "property-suite-path": "specs/vault.property-suite.json",
+      },
+      "requires run-mode: evaluate",
+    ],
+    [
+      { "run-mode": "evaluate", "property-suite-path": "specs/vault.json" },
+      "must point to a .property-suite.json file",
+    ],
+    [
+      {
+        "run-mode": "evaluate",
+        "property-suite-path": "../vault.property-suite.json",
+      },
+      "without traversal",
+    ],
+  ])("rejects AutoProver inputs %j", (values, message) => {
+    inputs.set("workflow", "auto-prover");
+    inputs.set("contract-path", "src/Vault.sol");
+    inputs.set("contract-name", "Vault");
+    for (const [name, value] of Object.entries(values)) inputs.set(name, value);
+    expect(() => getConfig()).toThrow(message);
+  });
+
+  it.each([
+    ["auto-fuzzer", "run-mode", "evaluate"],
+    ["auto-fuzzer", "property-suite-path", "specs/vault.property-suite.json"],
+    ["ai-auditor-diff", "run-mode", "evaluate"],
+    ["ai-auditor-full", "property-suite-path", "specs/vault.property-suite.json"],
+  ])("rejects %s with %s", (workflow, name, value) => {
+    inputs.set("workflow", workflow);
+    inputs.set("contract-path", "src/Vault.sol");
+    inputs.set("contract-name", "Vault");
+    inputs.set("scope", "src/**");
+    inputs.set(name, value);
+    expect(() => getConfig()).toThrow(
+      "run-mode and property-suite-path are only supported by auto-prover",
+    );
+  });
+
   it("rejects threat models for AutoFuzzer", () => {
     inputs.set("workflow", "auto-fuzzer");
     inputs.set("contract-path", "src/Vault.sol");

@@ -294,6 +294,35 @@ arrays are rejected rather than silently changing the audit selection.
 
 `threat-model-path` is supported only by AutoProver.
 
+### AutoProver run modes and property suites
+
+`run-mode` selects what AutoProver does: `prioritized` (the server default)
+formalizes the top-ranked property and its cluster, `comprehensive` formalizes
+every candidate property, and `evaluate` writes no specs: it runs the specs and
+confs already in the repository and reports how well they cover the contract's
+properties. An `evaluate` run has no generated files, so its delivery ends as
+`no_changes` and pushes no commit.
+
+With `run-mode: evaluate`, `property-suite-path` names a repository-relative
+`*.property-suite.json` file that lists your properties. The run takes its
+properties from the suite instead of inferring them, and maps your spec rules
+to them through `@property` tags. Design and threat-model documents then only
+rank the suite's properties.
+
+```yaml
+- uses: Certora/autoprover-guardian-ci@v2
+  with:
+    api-key: ${{ secrets.CERTORA_API_KEY }}
+    workflow: auto-prover
+    contract-path: src/Vault.sol
+    contract-name: Vault
+    run-mode: evaluate
+    property-suite-path: specs/vault.property-suite.json
+```
+
+Both inputs are refused by every other workflow, and `property-suite-path` is
+refused without `run-mode: evaluate`.
+
 ## Independent configurations
 
 Multiple workflow files can run AI Auditor, AutoProver for several contracts,
@@ -439,6 +468,8 @@ errors, so correcting the repository access or path and rerunning is safe.
 | `contract-name`     | AP/AF              | —                         | Solidity contract declaration name                     |
 | `design-doc-path`   | No                 | —                         | Repository-relative `.md`, `.markdown`, or `.pdf`      |
 | `threat-model-path` | No                 | —                         | AutoProver-only threat model path                      |
+| `run-mode`          | No                 | server default (`prioritized`) | AutoProver only: `prioritized`, `comprehensive`, or `evaluate` |
+| `property-suite-path` | No               | —                         | AutoProver `evaluate` only: `*.property-suite.json` path |
 
 ## Outputs
 

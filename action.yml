@@ -123,6 +123,14 @@ inputs:
     description: "AutoProver only: optional repository-relative .md, .markdown, or .pdf threat model"
     required: false
 
+  run-mode:
+    description: "AutoProver only: prioritized (server default), comprehensive, or evaluate. evaluate writes no specs: it runs the specs and confs already in the repository and reports how well they cover the contract's properties"
+    required: false
+
+  property-suite-path:
+    description: "AutoProver with run-mode evaluate only: optional repository-relative *.property-suite.json file listing your properties. The run takes its properties from it instead of inferring them"
+    required: false
+
 outputs:
   run-id:
     description: "Certora run ID"
