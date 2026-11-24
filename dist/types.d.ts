@@ -1,5 +1,10 @@
 export type Severity = "HIGH" | "MEDIUM" | "LOW" | "INFO";
 export type ModelMode = "normal" | "frontier";
+/**
+ * AutoProver run modes whose result is a report. The API also accepts
+ * property_generation, whose result is a property set this action does not read.
+ */
+export type AutoProverRunMode = "prioritized" | "comprehensive" | "evaluate";
 export type Workflow = "ai-auditor-full" | "ai-auditor-diff" | "ai-auditor-finding-validation" | "auto-prover" | "auto-fuzzer";
 export type RunType = "ai_auditor_full" | "ai_auditor_diff" | "ai_auditor_finding_validation" | "auto_prover" | "auto_fuzzer";
 export type Engine = "ai-auditor" | "auto-prover" | "auto-fuzzer";
@@ -100,9 +105,11 @@ export type StandaloneRunRequest = {
         path: string;
         name: string;
     };
+    run_mode?: AutoProverRunMode;
     documents?: {
         design?: string;
         threat_model?: string;
+        property_suite?: string;
     };
     delivery: {
         type: "github_pull_request";
@@ -348,6 +355,8 @@ export type StandaloneActionConfig = CommonActionConfig & {
     contractName: string;
     designDocPath?: string;
     threatModelPath?: string;
+    runMode?: AutoProverRunMode;
+    propertySuitePath?: string;
 };
 export type ActionConfig = AiAuditorActionConfig | FindingValidationActionConfig | StandaloneActionConfig;
 export declare function workflowEngine(workflow: Workflow): Engine;

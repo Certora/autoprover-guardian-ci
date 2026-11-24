@@ -1,6 +1,11 @@
 export type Severity = "HIGH" | "MEDIUM" | "LOW" | "INFO";
 
 export type ModelMode = "normal" | "frontier";
+/**
+ * AutoProver run modes whose result is a report. The API also accepts
+ * property_generation, whose result is a property set this action does not read.
+ */
+export type AutoProverRunMode = "prioritized" | "comprehensive" | "evaluate";
 
 export type Workflow =
   | "ai-auditor-full"
@@ -124,9 +129,11 @@ export type StandaloneRunRequest = {
     path: string;
     name: string;
   };
+  run_mode?: AutoProverRunMode;
   documents?: {
     design?: string;
     threat_model?: string;
+    property_suite?: string;
   };
   delivery: {
     type: "github_pull_request";
@@ -400,6 +407,8 @@ export type StandaloneActionConfig = CommonActionConfig & {
   contractName: string;
   designDocPath?: string;
   threatModelPath?: string;
+  runMode?: AutoProverRunMode;
+  propertySuitePath?: string;
 };
 
 export type ActionConfig =

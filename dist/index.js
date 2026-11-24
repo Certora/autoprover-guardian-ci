@@ -32616,6 +32616,12 @@ const VALID_WORKFLOWS = new Set([
 ]);
 const SOLIDITY_IDENTIFIER_REGEX = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const DOCUMENT_EXTENSIONS = new Set(["md", "markdown", "pdf"]);
+const AUTO_PROVER_RUN_MODES = new Set([
+    "prioritized",
+    "comprehensive",
+    "evaluate",
+]);
+const PROPERTY_SUITE_SUFFIX = ".property-suite.json";
 function parseSeverities(input, name) {
     if (!input.trim())
         return [];
@@ -32772,6 +32778,15 @@ function parseModelMode(input) {
     }
     return mode;
 }
+function parseRunMode(input) {
+    const mode = input.trim();
+    if (!mode)
+        return undefined;
+    if (!AUTO_PROVER_RUN_MODES.has(mode)) {
+        throw new Error('run-mode must be "prioritized", "comprehensive", or "evaluate".');
+    }
+    return mode;
+}
 function validateRepositoryPath(input, name, required) {
     const path = input.trim();
     if (!path) {
@@ -32805,6 +32820,13 @@ function validateDocumentPath(input, name) {
     const extension = path.split(".").pop()?.toLowerCase();
     if (!extension || !DOCUMENT_EXTENSIONS.has(extension)) {
         throw new Error(`${name} must point to a .md, .markdown, or .pdf file.`);
+    }
+    return path;
+}
+function validatePropertySuitePath(input) {
+    const path = validateRepositoryPath(input, "property-suite-path", false);
+    if (path && !path.endsWith(PROPERTY_SUITE_SUFFIX)) {
+        throw new Error(`property-suite-path must point to a ${PROPERTY_SUITE_SUFFIX} file.`);
     }
     return path;
 }
@@ -32861,6 +32883,12 @@ function getConfig() {
         throw new Error("wait-for-completion: false is only supported by full/diff AI Auditor workflows.");
     }
     const modelModeInput = core.getInput("model-mode");
+    const runModeInput = core.getInput("run-mode");
+    const propertySuiteInput = core.getInput("property-suite-path");
+    if (workflow !== "auto-prover" &&
+        (runModeInput.trim() || propertySuiteInput.trim())) {
+        throw new Error("run-mode and property-suite-path are only supported by auto-prover.");
+    }
     if (workflow === "auto-prover" || workflow === "auto-fuzzer") {
         if (modelModeInput.trim()) {
             throw new Error("model-mode is only supported by AI Auditor workflows.");
@@ -32920,6 +32948,11 @@ function getConfig() {
         if (workflow === "auto-fuzzer" && threatModelPath) {
             throw new Error("threat-model-path is only supported by auto-prover.");
         }
+        const runMode = parseRunMode(runModeInput);
+        const propertySuitePath = validatePropertySuitePath(propertySuiteInput);
+        if (propertySuitePath && runMode !== "evaluate") {
+            throw new Error("property-suite-path requires run-mode: evaluate.");
+        }
         return {
             ...common,
             workflow,
@@ -32927,6 +32960,8 @@ function getConfig() {
             contractName,
             designDocPath,
             threatModelPath,
+            runMode,
+            propertySuitePath,
         };
     }
     const contextInput = core.getInput("context");
@@ -34078,10 +34113,16 @@ function buildRunRequest(config) {
             path: standaloneConfig.contractPath,
             name: standaloneConfig.contractName,
         },
-        documents: standaloneConfig.designDocPath || standaloneConfig.threatModelPath
+        ...(standaloneConfig.runMode
+            ? { run_mode: standaloneConfig.runMode }
+            : {}),
+        documents: standaloneConfig.designDocPath ||
+            standaloneConfig.threatModelPath ||
+            standaloneConfig.propertySuitePath
             ? {
                 design: standaloneConfig.designDocPath,
                 threat_model: standaloneConfig.threatModelPath,
+                property_suite: standaloneConfig.propertySuitePath,
             }
             : undefined,
         delivery: {

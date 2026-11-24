@@ -949,6 +949,44 @@ describe("run v2 orchestration", () => {
     );
   });
 
+  it("sends an AutoProver run mode and property suite", () => {
+    const request = buildRunRequest({
+      ...standaloneConfig("auto-prover"),
+      runMode: "evaluate",
+      propertySuitePath: "specs/vault.property-suite.json",
+    });
+    expect(request).toMatchObject({
+      run_mode: "evaluate",
+      documents: {
+        design: "docs/design.md",
+        threat_model: "docs/threat-model.md",
+        property_suite: "specs/vault.property-suite.json",
+      },
+    });
+  });
+
+  it("sends a property suite as the only document", () => {
+    const request = buildRunRequest({
+      ...standaloneConfig("auto-prover"),
+      designDocPath: undefined,
+      threatModelPath: undefined,
+      runMode: "evaluate",
+      propertySuitePath: "specs/vault.property-suite.json",
+    });
+    expect(JSON.parse(JSON.stringify(request)).documents).toEqual({
+      property_suite: "specs/vault.property-suite.json",
+    });
+  });
+
+  it.each(["auto-prover", "auto-fuzzer"] as const)(
+    "omits the run mode from default %s requests",
+    (workflow) => {
+      expect(buildRunRequest(standaloneConfig(workflow))).not.toHaveProperty(
+        "run_mode",
+      );
+    },
+  );
+
   it.each(["auto-prover", "auto-fuzzer"] as const)(
     "does not add audit mode to %s requests",
     (workflow) => {

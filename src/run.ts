@@ -246,11 +246,17 @@ export function buildRunRequest(config: ActionConfig): RunRequest {
       path: standaloneConfig.contractPath,
       name: standaloneConfig.contractName,
     },
+    ...(standaloneConfig.runMode
+      ? { run_mode: standaloneConfig.runMode }
+      : {}),
     documents:
-      standaloneConfig.designDocPath || standaloneConfig.threatModelPath
+      standaloneConfig.designDocPath ||
+      standaloneConfig.threatModelPath ||
+      standaloneConfig.propertySuitePath
         ? {
             design: standaloneConfig.designDocPath,
             threat_model: standaloneConfig.threatModelPath,
+            property_suite: standaloneConfig.propertySuitePath,
           }
         : undefined,
     delivery: {
